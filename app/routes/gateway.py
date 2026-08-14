@@ -41,8 +41,29 @@ MODEL_NAME_MAP = {
 # /v1/models 对外公布的可用模型（GLM-5.3 排第一作为客户端默认）
 AVAILABLE_MODELS = ["GLM-5.3", "GLM-5.2", "GLM-5-Turbo"]
 
-# 命中以下信号则认为账号额度用完
-_EXHAUST_KEYWORDS = ("quota", "insufficient", "balance", "exhaust", "额度", "余额不足")
+# 命中以下信号才认为账号额度用完（避免把普通 4xx 校验错误误判为额度耗尽）
+_EXHAUST_KEYWORDS = ("余额不足", "额度已用完", "quota exceeded", "out of quota")
+
+
+def _fix_thinking(body: dict) -> dict:
+    """GLM-5.3 强制思考模式：客户端未显式开启时自动注入官方 thinking 格式。"""
+    model = str(body.get("model") or "")
+    if "5.3" not in model:
+        return body
+    thinking = body.get("thinking")
+    if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+        thinking = {"type": "enabled", "budget_tokens": _thinking_budget(body)}
+    elif not thinking.get("budget_tokens"):
+        thinking = {**thinking, "budget_tokens": _thinking_budget(body)}
+    body["thinking"] = thinking
+    if "reasoning_effort" not in body:
+        body["reasoning_effort"] = settings.REASONING_EFFORT
+    return body
+
+
+def _thinking_budget(body: dict) -> int:
+    max_tokens = int(body.get("max_tokens") or 4096)
+    return max(1024, min(settings.THINKING_BUDGET_TOKENS, max_tokens - 1024))
 
 _NEXT_ACCOUNT = object()
 
@@ -78,6 +99,8 @@ def _normalize_body(body: dict) -> dict:
         model = MODEL_NAME_MAP.get(model.lower(), model)
         body["model"] = model
 
+    _fix_thinking(body)
+
     messages = body.get("messages")
     if isinstance(messages, list):
         bridged = []
@@ -96,8 +119,10 @@ def _is_captcha_error(text: str) -> bool:
 
 
 def _is_exhausted(status_code: int, text: str) -> bool:
-    if status_code in (402,):
+    if status_code == 402:
         return True
+    if status_code in (401, 403, 429):  # 鉴权/限流另行处理，不按文本判定
+        return False
     low = text.lower()
     return any(k in low for k in _EXHAUST_KEYWORDS)
 
@@ -487,12 +512,6 @@ async def _forward_once(req_id, account, body, payload, incoming_headers, verify
                     continue  # 同路径重试（换新验证码）
                 raise _CaptchaRejected
 
-            if _is_exhausted(status_code, text):
-                _mark(account, Status.EXHAUSTED, "额度已用完")
-                logs.warn(req_id, f"账号 {account.name} 额度用完，切换下一个")
-                asyncio.create_task(_safe_refresh(account))
-                raise _AccountBad
-
             if status_code in (401, 403):
                 _mark(account, Status.INVALID, f"鉴权失败 HTTP {status_code}")
                 logs.warn(req_id, f"账号 {account.name} 鉴权失败 {status_code}，切换下一个")
@@ -501,6 +520,12 @@ async def _forward_once(req_id, account, body, payload, incoming_headers, verify
             if status_code == 429:
                 _mark(account, Status.COOLING, "上游限流 429")
                 logs.warn(req_id, f"账号 {account.name} 被限流 429，切换下一个")
+                raise _AccountBad
+
+            if _is_exhausted(status_code, text):
+                _mark(account, Status.EXHAUSTED, "额度已用完")
+                logs.warn(req_id, f"账号 {account.name} 额度用完，切换下一个")
+                asyncio.create_task(_safe_refresh(account))
                 raise _AccountBad
 
             # 其它错误：直接回传客户端

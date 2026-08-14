@@ -139,6 +139,8 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 | `ZCODE_CAPTCHA_TIMEOUT` | 40 | 单次验证码求解超时（秒）|
 | `ZCODE_CAPTCHA_RETRIES` | 4 | 验证码求解失败重试次数 |
 | `ZCODE_APP_VERSION` | 3.7.7 | 伪装的上游客户端版本号（请求头与配置接口）|
+| `ZCODE_THINKING_BUDGET` | 8192 | GLM-5.3 强制思考：客户端未开启时自动注入的思考预算 tokens |
+| `ZCODE_REASONING_EFFORT` | max | GLM-5.3 思考深度（low / high / max）|
 | `ZCODE_OAUTH_REDIRECT_URI` | https://zcode.z.ai/login | OAuth 回跳地址。Z.AI 按 client_id 校验白名单，该公开 client_id 仅注册了 `/login`，请勿改动 |
 | `CAPTCHA_CACHE_TTL` | 45000 | 验证码缓存时长 (ms) |
 | `ZAI_UPSTREAM_URL` / `ZAI_FALLBACK_URL` / `BIGMODEL_UPSTREAM_URL` | — | 上游端点 |

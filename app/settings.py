@@ -90,6 +90,12 @@ ZCODE_BILLING_BASE = os.getenv(
     "https://zcode.z.ai/api/v1/zcode-plan",
 ).rstrip("/")
 
+# ── GLM-5.3 强制思考模式 ─────────────────────────────────────────────────────
+# 客户端未显式开启 thinking 时，网关自动注入 {"type":"enabled","budget_tokens":N}。
+# 上游仅接受 enabled（不允许禁用思考），思考深度由 reasoning_effort 控制（low/high/max）。
+THINKING_BUDGET_TOKENS = _int("ZCODE_THINKING_BUDGET", 8192)
+REASONING_EFFORT = os.getenv("ZCODE_REASONING_EFFORT", "max")
+
 # 对齐 ZCode 桌面端版本号（上游 configs / 请求头均校验版本）
 ZCODE_APP_VERSION = os.getenv("ZCODE_APP_VERSION", "3.7.7")
 USER_AGENT = os.getenv("UPSTREAM_USER_AGENT", f"ZCode/{ZCODE_APP_VERSION}")
