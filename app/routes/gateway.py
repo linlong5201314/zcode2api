@@ -29,6 +29,7 @@ MAX_ACCOUNT_ATTEMPTS = 5
 
 # Z.AI 上游模型名大小写敏感
 MODEL_NAME_MAP = {
+    "glm-5.3": "GLM-5.3",
     "glm-5.2": "GLM-5.2",
     "glm-5-turbo": "GLM-5-Turbo",
     "glm-turbo": "GLM-5-Turbo",
@@ -36,8 +37,8 @@ MODEL_NAME_MAP = {
     "glm-4.7": "GLM-4.7",
 }
 
-# /v1/models 对外公布的可用模型
-AVAILABLE_MODELS = ["GLM-5.2", "GLM-5-Turbo"]
+# /v1/models 对外公布的可用模型（GLM-5.3 排第一作为客户端默认）
+AVAILABLE_MODELS = ["GLM-5.3", "GLM-5.2", "GLM-5-Turbo"]
 
 # 命中以下信号则认为账号额度用完
 _EXHAUST_KEYWORDS = ("quota", "insufficient", "balance", "exhaust", "额度", "余额不足")

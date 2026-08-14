@@ -15,9 +15,9 @@
 | 协议兼容 | 完整复刻 Anthropic `/v1/messages` 请求/响应(含 SSE 流式) |
 | 高可用 | 多账号 round-robin;单账号失败/额度耗尽自动切换下一个 |
 | 可观测 | 后台周期刷新各账号额度,UI 实时展示状态与剩余额度 |
-| 无浏览器 | 用 Node + jsdom 在模拟浏览器环境跑阿里云无痕 SDK,**不启动真实浏览器** |
+| 无痕验证 | 用 Playwright 无头 Chromium 跑阿里云无痕 SDK,风控识破 jsdom 后切换为真实浏览器内核 |
 | 凭证安全 | 账号/密钥仅落本地 SQLite;前端鉴权,token 脱敏展示 |
-| 轻量部署 | 单进程 FastAPI + 一个 Node 子进程;无外部数据库依赖 |
+| 轻量部署 | 单进程 FastAPI;按需启动无头 Chromium 求解;无外部数据库依赖 |
 
 ---
 
@@ -43,7 +43,7 @@ graph TD
         OAUTH["OAuth Flow<br/>Z.AI 登录入池"]
     end
 
-    SOLVER["Captcha Solver（Node 子进程）<br/>jsdom + 阿里云无痕 SDK"]
+    SOLVER["Captcha Solver（无头 Chromium）<br/>Playwright + 阿里云无痕 SDK"]
     DB[("SQLite<br/>data/accounts.db (WAL)")]
 
     subgraph Upstream["上游"]
@@ -96,8 +96,8 @@ graph TD
 | Account Model | `app/models.py` | `Account` 数据类、`Status` 状态、可选中判定、脱敏视图 |
 | Request Builder | `app/agent.py` | 按凭证选上游端点、组装请求头(含 `X-Aliyun-Captcha-Verify-Param`) |
 | Quota Monitor | `app/quota.py` | 单账号额度查询 + 状态判定 + 后台周期刷新任务 |
-| Captcha Manager | `app/captcha.py` | 拉取验证码配置、调用 Node 求解器、缓存/并发去重/重试 |
-| Captcha Solver | `captcha_node/solver.js` | jsdom 模拟浏览器跑阿里云无痕 SDK,输出 `verifyParam` |
+| Captcha Manager | `app/captcha.py` | 拉取验证码配置、启动无头 Chromium 求解、缓存/并发去重/重试 |
+| Captcha Solver | `app/captcha.py`(Playwright) | 无头 Chromium 跑阿里云无痕 SDK,输出 `verifyParam` |
 | OAuth Flow | `app/oauth.py` | Z.AI OAuth（授权码中转）：构造授权链接 → 浏览器登录后复制回跳 code → 兑换 Coding Plan JWT / API Key |
 | Settings | `app/settings.py` | 环境变量 / 默认值 / 路径 / 上游端点 |
 | Logs | `app/logs.py` | 彩色终端日志(banner / req / req_ok / req_err …) |
@@ -113,7 +113,7 @@ sequenceDiagram
     participant GW as Gateway
     participant S as Account Store
     participant CM as Captcha Manager
-    participant SV as Node Solver
+    participant SV as 无头 Chromium
     participant A as Request Builder
     participant U as 上游(zcode.z.ai)
 
@@ -131,8 +131,8 @@ sequenceDiagram
                 alt 缓存命中（TTL 内）
                     CM-->>GW: verifyParam（缓存）
                 else 缓存失效
-                    CM->>SV: spawn solver.js(scene,region,prefix)
-                    SV-->>CM: VERIFY_PARAM=...
+                    CM->>SV: 启动无头 Chromium(scene,region,prefix)
+                    SV-->>CM: verifyParam（SDK success 回调）
                     CM-->>GW: verifyParam（写缓存）
                 end
             end
@@ -205,35 +205,37 @@ return pool[idx]
 
 ---
 
-## 6. 无浏览器无痕验证
+## 6. 无痕验证（无头 Chromium）
 
 Coding Plan(JWT)模式访问 `zcode.z.ai` 上游需携带阿里云无痕验证参数
-(请求头 `X-Aliyun-Captcha-Verify-Param`)。本项目**不启动真实浏览器**,而是:
+(请求头 `X-Aliyun-Captcha-Verify-Param`)。网关用 Playwright 无头 Chromium 运行官方 SDK:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant CM as Captcha Manager (Python)
     participant CFG as zcode.z.ai/client/configs
-    participant SV as Node Solver (jsdom)
+    participant BR as 无头 Chromium (Playwright)
     participant CDN as o.alicdn.com
     participant ALI as 阿里云无痕服务
 
-    CM->>CFG: GET 验证码配置（sceneId/region/prefix）
+    CM->>CFG: GET 验证码配置（version/os 参数）
     CFG-->>CM: {sceneId, region, prefix}
-    CM->>SV: spawn solver.js（子进程）
-    SV->>SV: 构造 jsdom，注入浏览器 API 桩<br/>(matchMedia/canvas/WebGL/Worker/OffscreenCanvas)
-    SV->>CDN: 加载 AliyunCaptcha.js
-    SV->>ALI: initAliyunCaptcha + startTracelessVerification
-    ALI-->>SV: success(verifyParam)
-    SV-->>CM: stdout: VERIFY_PARAM=<param>
+    CM->>BR: 启动无头 Chromium（伪装 UA / 关闭自动化特征）
+    BR->>BR: 先落地 zcode.z.ai 同源页，再注入求解页
+    BR->>CDN: 加载 AliyunCaptcha.js
+    BR->>ALI: initAliyunCaptcha + startTracelessVerification
+    ALI-->>BR: success(verifyParam)
+    BR-->>CM: 回调 JSON（含 verifyParam）
     CM->>CM: 写缓存（CAPTCHA_CACHE_TTL，默认 45s）
 ```
 
 - `verifyParam` 实为 `base64(JSON{certifyId, sceneId, isSign, securityToken})`,由阿里云服务端签发。
-- **缓存**:TTL 内复用;**并发去重**:同一时刻仅跑一个求解进程(`asyncio.Lock`);
+- **缓存**:TTL 内复用;**并发去重**:同一时刻仅跑一个求解(`asyncio.Lock`);
   **重试**:`CAPTCHA_SOLVE_RETRIES`(默认 4)次。
 - 仅 zai + JWT 账号需要;API Key 账号走 `api.z.ai` 回退端点,无需验证码。
+- 曾用 Node + jsdom 模拟环境求解,后被风控识破(`verifyCode=F001` 环境风险拒绝),
+  故改为真实内核的无头 Chromium。
 
 ---
 
@@ -267,7 +269,7 @@ meta(      key PK, value )      # admin_key / gateway_key / quota_refresh_interv
 
 所有可调参数集中在 `app/settings.py`,均可由环境变量覆盖(见 `README.md` 的环境变量表)。
 要点:`ZCODE_PORT`、`ZCODE_DATA_DIR`、`ZCODE_QUOTA_REFRESH_INTERVAL`、`ZCODE_COOLING_SECONDS`、
-`ZCODE_NODE_PATH`、`ZCODE_CAPTCHA_TIMEOUT`、`ZCODE_CAPTCHA_RETRIES`、`CAPTCHA_CACHE_TTL`。
+`ZCODE_APP_VERSION`、`ZCODE_CAPTCHA_TIMEOUT`、`ZCODE_CAPTCHA_RETRIES`、`CAPTCHA_CACHE_TTL`。
 
 ---
 
@@ -280,14 +282,13 @@ meta(      key PK, value )      # admin_key / gateway_key / quota_refresh_interv
 │   ├── models.py          # Account / Status
 │   ├── store.py           # SQLite 持久化 + 轮询游标
 │   ├── agent.py           # Request Builder
-│   ├── captcha.py         # Captcha Manager
+│   ├── captcha.py         # Captcha Manager + Solver（Playwright 无头 Chromium）
 │   ├── quota.py           # Quota Monitor
 │   ├── oauth.py           # OAuth Flow
 │   ├── auth_admin.py      # 鉴权依赖
 │   ├── logs.py            # 彩色日志
 │   ├── routes/            # gateway / admin_api / pages
 │   └── statics/           # css / js / admin/*.html
-├── captcha_node/          # Captcha Solver（Node + jsdom，solver.js）
 ├── main.py                # CLI 入口
 ├── data/                  # 运行时生成：accounts.db
 └── docs/ARCHITECTURE.md   # 本文件
@@ -304,9 +305,9 @@ meta(      key PK, value )      # admin_key / gateway_key / quota_refresh_interv
   `total_units` / `used_units` / `remaining_units` / `expires_at`)主要依据观测,不同套餐可能不一致。
 - **额度用完判定**:`exhausted` 触发条件(余额=0、HTTP 402、错误体含 `quota/insufficient/余额` 等关键字)
   为启发式;真实上游的耗尽信号若不同,可能需要调整 `app/quota.py` / `app/routes/gateway.py` 的判定。
-- **模型清单**:`/v1/models` 当前固定为 `GLM-5.2` 与 `GLM-5-Turbo`,未做上游动态拉取。
-- **无痕验证 SDK**:`solver.js` 运行的是阿里云自家混淆 SDK;若其指纹逻辑(feilin / cloudauth-device)更新,
-  jsdom 中补齐的浏览器 API 桩可能需要相应调整。
+- **模型清单**:`/v1/models` 当前固定为 `GLM-5.3`、`GLM-5.2` 与 `GLM-5-Turbo`,未做上游动态拉取。
+- **无痕验证 SDK**:求解器运行的是阿里云自家混淆 SDK;其指纹逻辑(feilin / cloudauth-device)更新时
+  可能需要调整 `app/captcha.py` 中的无头浏览器伪装参数(UA / 自动化特征)。
 - **限流/冷却时长**:`COOLING_SECONDS` 为经验默认值,非上游明确约定。
 
 如发现实际行为与本文档不符,请优先以真实上游为准,并通过 Issue/PR 帮助我们修正文档与判定逻辑。

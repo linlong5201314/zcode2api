@@ -7,8 +7,7 @@
 
 ```bash
 pip install -r requirements.txt
-# 无痕验证求解器（无浏览器，Node + jsdom）。需已安装 Node.js：
-cd captcha_node && npm install && cd ..
+python -m playwright install chromium   # 无痕验证求解用无头 Chromium（首次）
 cp .env.example .env                     # 按需修改
 
 python main.py serve                     # 启动网关 + 后台 UI（默认端口 3000）
@@ -19,7 +18,7 @@ python main.py serve                     # 启动网关 + 后台 UI（默认端�
 
 ## Docker 部署
 
-镜像内同时包含 Python(网关)与 Node(无浏览器无痕验证求解器),开箱即用。
+镜像内包含 Python(网关)与 Playwright 无头 Chromium(无痕验证求解器),开箱即用。
 
 ```bash
 # 方式一：docker compose（推荐）
@@ -96,21 +95,20 @@ docker run -d --name zcode2api -p 3000:3000 \
 - **网关鉴权（可选）**：在「设置」配置「网关 API Key」后，`/v1/messages` 须携带
   `Authorization: Bearer <key>` 或 `x-api-key: <key>`；留空则不校验。
 
-## 无痕验证（无浏览器）
+## 无痕验证（无头 Chromium）
 
 Coding Plan（JWT）模式调用 `zcode.z.ai` 上游时需要阿里云无痕验证参数
-（请求头 `X-Aliyun-Captcha-Verify-Param`）。本项目**不启动任何真实浏览器**，
-而是用 **Node + jsdom** 在模拟浏览器环境中运行阿里云官方无痕 SDK 来求得该参数。
+（请求头 `X-Aliyun-Captcha-Verify-Param`）。网关用 **Playwright 无头 Chromium**
+运行阿里云官方无痕 SDK 来求得该参数。
 
-- 求解器位于 `captcha_node/solver.js`；首次使用前需执行 `cd captcha_node && npm install`。
-- `app/captcha.py` 以子进程方式调用求解器，内置结果缓存（默认 45s）、并发去重与失败重试。
-- 求解器在 jsdom 中补齐了 SDK 依赖的浏览器 API（`matchMedia`、canvas/WebGL、`Worker`、`OffscreenCanvas`），
-  执行 `startTracelessVerification` 后输出 `verifyParam`。
+- 求解逻辑在 `app/captcha.py`：启动无头 Chromium（伪装普通 Chrome UA、关闭自动化特征），
+  在 `zcode.z.ai` 同源页面中执行 `startTracelessVerification`，捕获成功回调输出 `verifyParam`。
+- 内置结果缓存（默认 45s）、并发去重与失败重试；验证码配置从上游 `client/configs` 拉取。
 - `verifyParam` 实为 `base64(JSON{certifyId, sceneId, isSign, securityToken})`，由阿里云服务端签发。
 - 仅 Coding Plan（JWT）账号需要；API Key 账号走 `api.z.ai` 回退端点，无需验证码。
 
-> 求解器运行的是阿里云自家混淆 SDK。若阿里云更新其指纹逻辑（feilin / cloudauth-device），
-> 可能需要相应调整 `solver.js` 中补齐的浏览器 API 桩。该方案无需真实浏览器，比无头 Chromium 轻量很多。
+> 早期版本曾用 Node + jsdom 模拟浏览器环境，后被阿里云风控识破
+> （无痕验证返回 `verifyCode=F001` 环境风险拒绝），因此改用真实内核的无头 Chromium。
 
 ## 命令行
 
@@ -136,9 +134,9 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 | `ZCODE_DATA_DIR` | ./data | 数据目录（SQLite 存放处）|
 | `ZCODE_QUOTA_REFRESH_INTERVAL` | 60 | 后台刷新额度间隔（秒），0 关闭 |
 | `ZCODE_COOLING_SECONDS` | 300 | 限流冷却时长（秒）|
-| `ZCODE_NODE_PATH` | node | 无痕验证求解器使用的 Node 可执行文件 |
 | `ZCODE_CAPTCHA_TIMEOUT` | 40 | 单次验证码求解超时（秒）|
 | `ZCODE_CAPTCHA_RETRIES` | 4 | 验证码求解失败重试次数 |
+| `ZCODE_APP_VERSION` | 3.7.7 | 伪装的上游客户端版本号（请求头与配置接口）|
 | `ZCODE_OAUTH_REDIRECT_URI` | https://zcode.z.ai/login | OAuth 回跳地址。Z.AI 按 client_id 校验白名单，该公开 client_id 仅注册了 `/login`，请勿改动 |
 | `CAPTCHA_CACHE_TTL` | 45000 | 验证码缓存时长 (ms) |
 | `ZAI_UPSTREAM_URL` / `ZAI_FALLBACK_URL` / `BIGMODEL_UPSTREAM_URL` | — | 上游端点 |
@@ -152,17 +150,16 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 │   ├── models.py          # Account 数据模型与状态
 │   ├── store.py           # SQLite 持久化 + 轮询游标（data/accounts.db）
 │   ├── agent.py           # 上游请求构建
-│   ├── captcha.py         # 无痕验证求解（调用 Node 求解器）
+│   ├── captcha.py         # 无痕验证求解（Playwright 无头 Chromium）
 │   ├── quota.py           # 额度查询 + 后台用量监控
 │   ├── oauth.py           # Z.AI OAuth 登录流程
 │   ├── auth_admin.py      # 后台 / 网关鉴权
 │   ├── logs.py            # 彩色终端日志
 │   ├── routes/            # gateway / admin_api / pages
 │   └── statics/           # app.css, auth.js, toast.js, header.js, admin/*.html
-├── captcha_node/          # 无浏览器无痕验证求解器（Node + jsdom，solver.js）
 ├── main.py                # 命令行入口（serve / login / accounts / quota ...）
 ├── data/                  # 运行时生成：accounts.db (SQLite)
-├── Dockerfile             # 镜像（Python + Node）
+├── Dockerfile             # 镜像（Python + Playwright Chromium）
 ├── docker-compose.yml     # 一键部署
 ├── .dockerignore
 ├── .github/workflows/     # docker-build.yml（仅构建验证，不推送 Docker Hub）
@@ -175,7 +172,7 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 
 - Python 3.13 · FastAPI · Uvicorn · httpx
 - SQLite（账号 / 设置持久化，WAL 模式）
-- Node.js + jsdom（无浏览器求解阿里云无痕验证 → verifyParam）
+- Playwright + 无头 Chromium（求解阿里云无痕验证 → verifyParam）
 
 ## 文档
 

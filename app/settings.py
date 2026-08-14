@@ -54,12 +54,11 @@ OAUTH_REDIRECT_URI = os.getenv("ZCODE_OAUTH_REDIRECT_URI", "https://zcode.z.ai/l
 CAPTCHA_CACHE_TTL = _int("CAPTCHA_CACHE_TTL", 45_000)          # ms
 CAPTCHA_CONFIG_CACHE_TTL = _int("CAPTCHA_CONFIG_CACHE_TTL", 600_000)  # ms
 
-# 验证码求解（无浏览器：Node + jsdom 模拟浏览器环境，运行阿里云无痕 SDK）
-NODE_PATH = os.getenv("ZCODE_NODE_PATH", "node")
-CAPTCHA_SOLVER_DIR = ROOT_DIR / "captcha_node"
-CAPTCHA_SOLVER_JS = CAPTCHA_SOLVER_DIR / "solver.js"
+# 验证码求解（Playwright 无头 Chromium 运行阿里云无痕 SDK）
 CAPTCHA_SOLVE_RETRIES = _int("ZCODE_CAPTCHA_RETRIES", 4)
 CAPTCHA_SOLVE_TIMEOUT = _int("ZCODE_CAPTCHA_TIMEOUT", 40)  # 每次求解超时（秒）
+# 留空使用 Playwright 自带 Chromium；本地调试可设 "chrome" / "msedge" 复用系统浏览器
+CAPTCHA_BROWSER_CHANNEL = os.getenv("ZCODE_CAPTCHA_BROWSER_CHANNEL", "") or None
 
 # ── 用量监控 ─────────────────────────────────────────────────────────────────
 # 后台自动刷新账号额度的间隔（秒）。0 表示关闭后台轮询，仅按需刷新。
@@ -86,5 +85,7 @@ UPSTREAM = {
 # ZCode 计费 / 额度查询端点
 ZCODE_BILLING_BASE = "https://zcode.z.ai/api/v1/zcode-plan"
 
-USER_AGENT = os.getenv("UPSTREAM_USER_AGENT", "ZCode/3.0.1")
+# 对齐 ZCode 桌面端版本号（上游 configs / 请求头均校验版本）
+ZCODE_APP_VERSION = os.getenv("ZCODE_APP_VERSION", "3.7.7")
+USER_AGENT = os.getenv("UPSTREAM_USER_AGENT", f"ZCode/{ZCODE_APP_VERSION}")
 APP_VERSION = "2.0.0"
