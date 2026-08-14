@@ -98,7 +98,7 @@ graph TD
 | Quota Monitor | `app/quota.py` | 单账号额度查询 + 状态判定 + 后台周期刷新任务 |
 | Captcha Manager | `app/captcha.py` | 拉取验证码配置、调用 Node 求解器、缓存/并发去重/重试 |
 | Captcha Solver | `captcha_node/solver.js` | jsdom 模拟浏览器跑阿里云无痕 SDK,输出 `verifyParam` |
-| OAuth Flow | `app/oauth.py` | Z.AI OAuth（授权码模式）：构造授权链接 → 浏览器登录 → 回调兑换 Coding Plan JWT / API Key |
+| OAuth Flow | `app/oauth.py` | Z.AI OAuth（授权码中转）：构造授权链接 → 浏览器登录后复制回跳 code → 兑换 Coding Plan JWT / API Key |
 | Settings | `app/settings.py` | 环境变量 / 默认值 / 路径 / 上游端点 |
 | Logs | `app/logs.py` | 彩色终端日志(banner / req / req_ok / req_err …) |
 

@@ -45,6 +45,11 @@ HOST = os.getenv("ZCODE_HOST", "0.0.0.0")
 # 后台管理密码默认值，首次启动写入 data/accounts.db，之后以数据库（meta 表）为准。
 DEFAULT_ADMIN_KEY = os.getenv("ZCODE_ADMIN_KEY", "zcode")
 
+# OAuth 授权码回跳地址。Z.AI 服务端按 client_id 校验重定向 URI 白名单，
+# 该公开 client_id 仅注册了 zcode.z.ai 的登录页 /login（与网页端实测一致），
+# 因此授权后需用户从地址栏复制 code 交给网关兑换。
+OAUTH_REDIRECT_URI = os.getenv("ZCODE_OAUTH_REDIRECT_URI", "https://zcode.z.ai/login")
+
 # ── 验证码缓存 ───────────────────────────────────────────────────────────────
 CAPTCHA_CACHE_TTL = _int("CAPTCHA_CACHE_TTL", 45_000)          # ms
 CAPTCHA_CONFIG_CACHE_TTL = _int("CAPTCHA_CONFIG_CACHE_TTL", 600_000)  # ms

@@ -18,13 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import time
 
 from app import settings
 from app.models import Status
-from app.oauth import ZaiAuthFlow
+from app.oauth import ZaiAuthFlow, extract_code
 from app.quota import fetch_quota
 from app.store import store
 
@@ -60,15 +59,15 @@ async def cmd_login(args: list[str]) -> None:
     if not args or args[0] != "zai":
         print(c("目前仅支持: python cli.py login zai", "red"))
         return
-    from urllib.parse import parse_qs, urlparse
 
-    port = int(os.getenv("ZCODE_LOGIN_PORT", "18365"))
-    redirect_uri = f"http://127.0.0.1:{port}/callback"
-    flow = ZaiAuthFlow(redirect_uri)
+    flow = ZaiAuthFlow(settings.OAUTH_REDIRECT_URI)
     authorize_url = flow.authorize_url()
 
-    print(c("\n✔ 已构造授权链接！请在浏览器中打开下面链接完成授权：", "green"))
+    print(c("\n✔ 已构造授权链接！请在浏览器中打开并完成 Z.AI 登录：", "green"))
     print(c(authorize_url, "blue"))
+    print(c("登录成功后浏览器会跳转到 zcode.z.ai/login 并带有 ?code=... 参数"
+            "（页面本身可能报错，可忽略），", "yellow"))
+    print(c("请把跳转后的完整地址（或 code 参数值）粘贴到下面：", "yellow"))
 
     if "--no-browser" not in args:
         try:
@@ -77,51 +76,18 @@ async def cmd_login(args: list[str]) -> None:
         except Exception:  # noqa: BLE001
             pass
 
-    print("正在等待授权...")
-    loop = asyncio.get_event_loop()
-    done: asyncio.Future = loop.create_future()
-
-    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            request_line = (await reader.readuntil(b"\r\n\r\n")).decode("utf-8", "ignore").split("\r\n")[0]
-            query = parse_qs(urlparse(request_line.split(" ")[1]).query)
-            body = "<html><body><h3>zcode2api 登录完成，请回到终端查看结果。</h3></body></html>".encode()
-            writer.write(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
-                + f"Content-Length: {len(body)}\r\n".encode()
-                + b"Connection: close\r\n\r\n" + body
-            )
-            await writer.drain()
-            if not done.done():
-                done.set_result((
-                    (query.get("code") or [""])[0],
-                    (query.get("state") or [""])[0],
-                    (query.get("error") or [""])[0],
-                ))
-        except Exception as err:  # noqa: BLE001
-            if not done.done():
-                done.set_exception(err)
-        finally:
-            writer.close()
-
     try:
-        server = await asyncio.start_server(_handle, "127.0.0.1", port)
-    except OSError as err:
-        print(c(f"❌ 本地回调端口 {port} 监听失败: {err}", "red"))
+        raw = input("code / 回跳地址> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(c("\n已取消登录。", "red"))
         return
-    async with server:
-        try:
-            code, state, error = await asyncio.wait_for(done, timeout=300)
-        except asyncio.TimeoutError:
-            print(c("❌ 登录超时，请重试。", "red"))
-            return
-
-    if error or not code:
-        print(c(f"❌ 授权失败: {error or '回调中缺少授权码'}", "red"))
+    code = extract_code(raw)
+    if not code:
+        print(c("❌ 未识别到授权码（code），请重试。", "red"))
         return
 
     try:
-        data = await flow.exchange(code, state)
+        data = await flow.exchange(code, flow.state)
     except Exception as err:  # noqa: BLE001
         print(c(f"❌ token 兑换失败: {err}", "red"))
         return

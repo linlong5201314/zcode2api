@@ -2,7 +2,9 @@
 
 真实流程（逆向自 zcode.z.ai 前端）：
 1. 构造授权链接 https://chat.z.ai/api/oauth/authorize?...，用户在浏览器登录 Z.AI；
-2. 登录成功后浏览器携带 code/state 重定向回 redirect_uri（网关回调或本地端口）；
+2. 登录成功后浏览器携带 code/state 重定向回 redirect_uri。该公开 client_id 仅注册了
+   https://zcode.z.ai/login（实测网页端发起登录时使用的回跳地址），其他地址会被
+   Z.AI 以「此客户端未注册重定向 URI」拒绝；
 3. 服务端 POST https://zcode.z.ai/api/v1/oauth/token 兑换凭证：
    data.token = Coding Plan JWT（上游对话用），data.zai.access_token = 业务 token。
 """
@@ -11,8 +13,8 @@ from __future__ import annotations
 
 import base64
 import json
-import secrets
-from urllib.parse import urlencode
+import uuid
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -26,13 +28,29 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
 
+def extract_code(raw: str) -> str:
+    """容忍用户粘贴整个回跳 URL，从中提取 code 参数。"""
+    raw = (raw or "").strip().strip('"\'')
+    if "code=" in raw:
+        try:
+            query = parse_qs(urlparse(raw).query)
+            return (query.get("code") or [""])[0]
+        except Exception:  # noqa: BLE001
+            return ""
+    return raw
+
+
 class ZaiAuthFlow:
     def __init__(self, redirect_uri: str) -> None:
         self.redirect_uri = redirect_uri
-        self.nonce = secrets.token_hex(16)
-        # state 为 base64url(JSON)，格式对齐网页端（nonce + redirect_uri）
+        self.nonce = str(uuid.uuid4())
+        # state 为 base64url(JSON)，字段与网页端实测一致（nonce + app_return_to + redirect_uri）
         self.state = _b64url(
-            json.dumps({"nonce": self.nonce, "redirect_uri": redirect_uri}).encode()
+            json.dumps({
+                "nonce": self.nonce,
+                "app_return_to": redirect_uri,
+                "redirect_uri": redirect_uri,
+            }, separators=(",", ":")).encode()
         )
 
     def authorize_url(self) -> str:

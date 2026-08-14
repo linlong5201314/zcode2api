@@ -51,7 +51,6 @@ def create_app() -> FastAPI:
 
     app.include_router(pages.router)
     app.include_router(admin_api.router)
-    app.include_router(admin_api.public_router)
     app.include_router(gateway.router)
     return app
 

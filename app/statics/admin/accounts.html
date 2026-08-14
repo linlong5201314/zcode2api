@@ -104,13 +104,18 @@
           <button onclick="startLogin()" id="login-start-btn" class="dialog-btn dialog-btn-primary w-full" style="height:40px">开始登录</button>
         </div>
         <div id="login-active" style="display:none">
-          <div class="dialog-help" style="margin-bottom:6px">请在浏览器中打开下面链接完成授权：</div>
+          <div class="dialog-help" style="margin-bottom:6px">① 打开下面链接，完成 Z.AI 账号登录：</div>
           <div style="display:flex;gap:8px;align-items:center">
             <input class="input" id="login-url" readonly style="font-size:12px">
             <button onclick="copyLoginUrl()" class="dialog-btn">复制</button>
             <button onclick="openLoginUrl()" class="dialog-btn dialog-btn-primary">打开</button>
           </div>
-          <div class="live-dot" id="login-status" style="margin-top:16px">等待授权中…</div>
+          <div class="dialog-help" style="margin:14px 0 6px">② 登录后浏览器会跳回 zcode.z.ai（页面可能报错，可忽略），把<b>地址栏完整网址</b>或其中的 <b>code 参数值</b>粘贴到下面：</div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input class="input" id="login-code" placeholder="粘贴回跳网址或 code 值..." style="font-size:12px">
+            <button onclick="finishLogin()" id="login-finish-btn" class="dialog-btn dialog-btn-primary">完成登录</button>
+          </div>
+          <div class="live-dot" id="login-status" style="margin-top:16px;display:none">处理中…</div>
         </div>
       </div>
       <div class="dialog-actions">
@@ -272,16 +277,14 @@ async function doAdd(){
 }
 
 /* ── 授权登录 ── */
-let _loginTimer=null, _loginUrl='';
+let _loginUrl='', _loginFlowId='';
 function switchAddTab(tab){
   document.getElementById('tab-paste').classList.toggle('active',tab==='paste');
   document.getElementById('tab-login').classList.toggle('active',tab==='login');
   document.getElementById('add-pane-paste').style.display=tab==='paste'?'':'none';
   document.getElementById('add-pane-login').style.display=tab==='login'?'':'none';
-  if(tab!=='login')stopLoginPoll();
 }
 function resetLoginPane(){
-  stopLoginPoll();
   _loginUrl='';
   document.getElementById('login-idle').style.display='';
   document.getElementById('login-active').style.display='none';
@@ -293,43 +296,48 @@ async function startLogin(){
   try{
     const d=await api('POST','/login/start');
     _loginUrl=d.authorize_url;
+    _loginFlowId=d.flow_id;
     document.getElementById('login-url').value=_loginUrl;
+    document.getElementById('login-code').value='';
     document.getElementById('login-idle').style.display='none';
     document.getElementById('login-active').style.display='';
-    setLoginStatus('等待授权中…',false);
+    setLoginStatus('',false);
     try{window.open(_loginUrl,'_blank','noopener');}catch{}
-    pollLogin(d.flow_id);
   }catch(e){
     showToast('发起登录失败: '+e.message,'error');
     btn.disabled=false;
   }
 }
-function pollLogin(flowId){
-  let n=0;
-  _loginTimer=setInterval(async()=>{
-    if(++n>120){stopLoginPoll();setLoginStatus('登录超时，请重试',true);return;}
-    try{
-      const d=await api('GET','/login/poll/'+flowId);
-      if(d.status==='ready'){
-        stopLoginPoll();
-        showToast('登录成功，已导入账号池','success');
-        closeModal('modal-add');
-        load();
-      }else if(d.status==='failed'){
-        stopLoginPoll();
-        setLoginStatus(d.message||'授权失败或被拒绝',true);
-      }
-    }catch(e){/* 单次失败继续轮询 */}
-  },2500);
+async function finishLogin(){
+  if(!_loginFlowId){showToast('请先开始登录','error');return;}
+  const code=document.getElementById('login-code').value.trim();
+  if(!code){showToast('请先粘贴回跳网址或 code 值','error');return;}
+  const btn=document.getElementById('login-finish-btn');
+  btn.disabled=true;
+  setLoginStatus('正在兑换凭证…',false);
+  try{
+    const d=await api('POST','/login/finish',{flow_id:_loginFlowId,code});
+    if(d.status==='ready'){
+      showToast('登录成功，已导入账号池','success');
+      closeModal('modal-add');
+      load();
+    }else{
+      setLoginStatus(d.message||'兑换失败，请重试',true);
+    }
+  }catch(e){
+    setLoginStatus('兑换失败: '+e.message,true);
+  }finally{
+    btn.disabled=false;
+  }
 }
 function setLoginStatus(text,isErr){
   const el=document.getElementById('login-status');
   el.textContent=text;
   el.classList.toggle('live-dot',!isErr);
+  el.style.display=text?'':'none';
   el.style.color=isErr?'var(--error)':'';
 }
-function stopLoginPoll(){if(_loginTimer){clearInterval(_loginTimer);_loginTimer=null;}}
-function cancelLogin(){stopLoginPoll();closeModal('modal-add');}
+function cancelLogin(){closeModal('modal-add');}
 function copyLoginUrl(){navigator.clipboard.writeText(_loginUrl).then(()=>showToast('已复制','success')).catch(()=>showToast('复制失败','error'));}
 function openLoginUrl(){if(_loginUrl)window.open(_loginUrl,'_blank','noopener');}
 

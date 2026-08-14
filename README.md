@@ -74,6 +74,22 @@ docker run -d --name zcode2api -p 3000:3000 \
 - 上游 429 → 标记 `cooling` 冷却一段时间后自动恢复；401/403（非验证码）→ 标记 `invalid`。
 - 后台任务按 `ZCODE_QUOTA_REFRESH_INTERVAL` 周期刷新各账号额度；也可在 UI 手动刷新。
 
+## OAuth 授权登录（Z.AI）
+
+后台「账号池 → 新增 → 授权登录」或 CLI `python main.py login zai` 均可发起：
+
+1. 网关生成 Z.AI 官方授权链接（`chat.z.ai/api/oauth/authorize`，与 zcode.z.ai 网页端同款协议）；
+2. 在浏览器打开并完成 Z.AI 账号登录，随后浏览器会跳回 `zcode.z.ai/login?code=...`（页面本身可能报错，可忽略）；
+3. 复制地址栏完整网址（或 `code` 参数值），粘贴回后台输入框 / CLI 提示符，网关即兑换
+   Coding Plan JWT 自动入池（并尝试兑换 API Key 作为回退凭证）。
+
+> Z.AI 服务端按 client_id 校验重定向 URI 白名单，只接受 zcode.z.ai 自家页面，
+> 因此无法由网关直接接收回调，需要用户手动中转一次 code。
+
+**备选：手动提取 JWT**。若上述流程不可用，可在浏览器登录 [zcode.z.ai](https://zcode.z.ai) 后，
+按 F12 打开控制台执行 `copy(localStorage.getItem('zcodejwttoken'))`（JWT 已进剪贴板），
+再通过「粘贴凭证」入池。
+
 ## 鉴权
 
 - **后台鉴权**：所有 `/admin/api/*` 需 `Authorization: Bearer <后台密码>`。
@@ -123,8 +139,7 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 | `ZCODE_NODE_PATH` | node | 无痕验证求解器使用的 Node 可执行文件 |
 | `ZCODE_CAPTCHA_TIMEOUT` | 40 | 单次验证码求解超时（秒）|
 | `ZCODE_CAPTCHA_RETRIES` | 4 | 验证码求解失败重试次数 |
-| `ZCODE_PUBLIC_URL` | 自动推断 | 网关对外可达地址（如 `https://xxx.up.railway.app`），OAuth 回调地址基于它生成；反代场景推断不准时手动指定 |
-| `ZCODE_LOGIN_PORT` | 18365 | CLI `login zai` 本地回调监听端口 |
+| `ZCODE_OAUTH_REDIRECT_URI` | https://zcode.z.ai/login | OAuth 回跳地址。Z.AI 按 client_id 校验白名单，该公开 client_id 仅注册了 `/login`，请勿改动 |
 | `CAPTCHA_CACHE_TTL` | 45000 | 验证码缓存时长 (ms) |
 | `ZAI_UPSTREAM_URL` / `ZAI_FALLBACK_URL` / `BIGMODEL_UPSTREAM_URL` | — | 上游端点 |
 
