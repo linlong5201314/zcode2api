@@ -31,8 +31,8 @@ RUN cd captcha_node && npm ci --omit=dev
 # ── 应用源码 ────────────────────────────────────────────────────────────────
 COPY . .
 
-# 账号 / 设置持久化目录（建议挂载到宿主机卷）
-VOLUME ["/data"]
+# 账号 / 设置持久化目录（建议挂载到宿主机卷；不使用 VOLUME 指令，Railway 等平台不支持）
+RUN mkdir -p /data
 EXPOSE 3000
 
 CMD ["python", "main.py", "serve"]
