@@ -15,6 +15,7 @@ python main.py serve                     # 启动网关 + 后台 UI（默认端�
 
 - 后台管理：`http://localhost:3000/admin`（默认密码 `zcode`）
 - 对话端点：`http://localhost:3000/v1/messages`（兼容 Anthropic Messages 协议）
+- OpenAI 兼容端点：`http://localhost:3000/v1/chat/completions`（流式 / 非流式均支持）
 
 ## Docker 部署
 

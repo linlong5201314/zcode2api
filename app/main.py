@@ -5,8 +5,10 @@ from __future__ import annotations
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import settings
 from . import logs
@@ -48,6 +50,25 @@ def create_app() -> FastAPI:
     app = FastAPI(title="zcode2api", version=settings.APP_VERSION, lifespan=lifespan)
 
     app.mount("/static", StaticFiles(directory=str(settings.STATIC_DIR)), name="static")
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exc_handler(request: Request, exc: StarletteHTTPException):
+        # 404 时回显请求路径，帮助客户端定位 base_url 配置问题
+        if exc.status_code == 404:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": f"Not Found: 未注册的路径 {request.method} {request.url.path}",
+                    "supported": [
+                        "POST /v1/messages          (Anthropic Messages 协议)",
+                        "POST /v1/chat/completions  (OpenAI 兼容)",
+                        "GET  /v1/models",
+                    ],
+                    "hint": "Anthropic/OpenAI 客户端的 base_url 应填网关根地址（结尾不要带 /v1）；"
+                            "如已带 /v1，网关会自动兼容 /v1/v1/* 路径。",
+                },
+            )
+        return JSONResponse(status_code=exc.status_code, content={"detail": str(exc.detail)})
 
     app.include_router(pages.router)
     app.include_router(admin_api.router)

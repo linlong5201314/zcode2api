@@ -83,7 +83,10 @@ UPSTREAM = {
 }
 
 # ZCode 计费 / 额度查询端点
-ZCODE_BILLING_BASE = "https://zcode.z.ai/api/v1/zcode-plan"
+ZCODE_BILLING_BASE = os.getenv(
+    "ZAI_BILLING_URL",
+    "https://zcode.z.ai/api/v1/zcode-plan",
+).rstrip("/")
 
 # 对齐 ZCode 桌面端版本号（上游 configs / 请求头均校验版本）
 ZCODE_APP_VERSION = os.getenv("ZCODE_APP_VERSION", "3.7.7")

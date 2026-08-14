@@ -26,12 +26,16 @@ def build_request(
     body: dict,
     verify_param: str | None,
     incoming_headers: dict | None = None,
+    use_fallback: bool = False,
 ) -> tuple[str, dict]:
-    """返回 (目标 URL, 请求头)。"""
+    """返回 (目标 URL, 请求头)。use_fallback=True 时走 API Key 回退端点（无验证码）。"""
     provider = account.provider
 
     if provider == "zai":
-        if account.mode == "jwt" and account.jwt_token:
+        if use_fallback and account.api_key:
+            target_url = settings.UPSTREAM["zai_fallback"]
+            auth = {"x-api-key": account.api_key}
+        elif account.mode == "jwt" and account.jwt_token:
             target_url = settings.UPSTREAM["zai"]
             auth = {"Authorization": f"Bearer {account.jwt_token}"}
         elif account.api_key:
