@@ -15,9 +15,9 @@
 | 协议兼容 | 完整复刻 Anthropic `/v1/messages` 请求/响应(含 SSE 流式) |
 | 高可用 | 多账号 round-robin;单账号失败/额度耗尽自动切换下一个 |
 | 可观测 | 后台周期刷新各账号额度,UI 实时展示状态与剩余额度 |
-| 无痕验证 | 用 Playwright 无头 Chromium 跑阿里云无痕 SDK,风控识破 jsdom 后切换为真实浏览器内核 |
+| 无痕验证 | 用 Playwright + 真实 Chrome 跑阿里云无痕 SDK（jsdom 与 Playwright 自带 Chromium 均被风控识破） |
 | 凭证安全 | 账号/密钥仅落本地 SQLite;前端鉴权,token 脱敏展示 |
-| 轻量部署 | 单进程 FastAPI;按需启动无头 Chromium 求解;无外部数据库依赖 |
+| 轻量部署 | 单进程 FastAPI;按需启动无头 Chrome 求解;无外部数据库依赖 |
 
 ---
 
@@ -43,7 +43,7 @@ graph TD
         OAUTH["OAuth Flow<br/>Z.AI 登录入池"]
     end
 
-    SOLVER["Captcha Solver（无头 Chromium）<br/>Playwright + 阿里云无痕 SDK"]
+    SOLVER["Captcha Solver（无头 Chrome）<br/>Playwright + 阿里云无痕 SDK"]
     DB[("SQLite<br/>data/accounts.db (WAL)")]
 
     subgraph Upstream["上游"]
@@ -96,8 +96,8 @@ graph TD
 | Account Model | `app/models.py` | `Account` 数据类、`Status` 状态、可选中判定、脱敏视图 |
 | Request Builder | `app/agent.py` | 按凭证选上游端点、组装请求头(含 `X-Aliyun-Captcha-Verify-Param`) |
 | Quota Monitor | `app/quota.py` | 单账号额度查询 + 状态判定 + 后台周期刷新任务 |
-| Captcha Manager | `app/captcha.py` | 拉取验证码配置、启动无头 Chromium 求解、缓存/并发去重/重试 |
-| Captcha Solver | `app/captcha.py`(Playwright) | 无头 Chromium 跑阿里云无痕 SDK,输出 `verifyParam` |
+| Captcha Manager | `app/captcha.py` | 拉取验证码配置、启动无头 Chrome 求解、缓存/并发去重/重试 |
+| Captcha Solver | `app/captcha.py`(Playwright) | 无头 Chrome（真实二进制）跑阿里云无痕 SDK,输出 `verifyParam` |
 | OAuth Flow | `app/oauth.py` | Z.AI OAuth（授权码中转）：构造授权链接 → 浏览器登录后复制回跳 code → 兑换 Coding Plan JWT / API Key |
 | Settings | `app/settings.py` | 环境变量 / 默认值 / 路径 / 上游端点 |
 | Logs | `app/logs.py` | 彩色终端日志(banner / req / req_ok / req_err …) |
@@ -113,7 +113,7 @@ sequenceDiagram
     participant GW as Gateway
     participant S as Account Store
     participant CM as Captcha Manager
-    participant SV as 无头 Chromium
+    participant SV as 无头 Chrome
     participant A as Request Builder
     participant U as 上游(zcode.z.ai)
 
@@ -131,7 +131,7 @@ sequenceDiagram
                 alt 缓存命中（TTL 内）
                     CM-->>GW: verifyParam（缓存）
                 else 缓存失效
-                    CM->>SV: 启动无头 Chromium(scene,region,prefix)
+                    CM->>SV: 启动无头 Chrome(scene,region,prefix)
                     SV-->>CM: verifyParam（SDK success 回调）
                     CM-->>GW: verifyParam（写缓存）
                 end
@@ -205,23 +205,23 @@ return pool[idx]
 
 ---
 
-## 6. 无痕验证（无头 Chromium）
+## 6. 无痕验证（真实 Chrome 无头模式）
 
 Coding Plan(JWT)模式访问 `zcode.z.ai` 上游需携带阿里云无痕验证参数
-(请求头 `X-Aliyun-Captcha-Verify-Param`)。网关用 Playwright 无头 Chromium 运行官方 SDK:
+(请求头 `X-Aliyun-Captcha-Verify-Param`)。网关用 Playwright + 真实 Chrome（无头）运行官方 SDK:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant CM as Captcha Manager (Python)
     participant CFG as zcode.z.ai/client/configs
-    participant BR as 无头 Chromium (Playwright)
+    participant BR as 无头 Chrome (Playwright)
     participant CDN as o.alicdn.com
     participant ALI as 阿里云无痕服务
 
     CM->>CFG: GET 验证码配置（version/os 参数）
     CFG-->>CM: {sceneId, region, prefix}
-    CM->>BR: 启动无头 Chromium（伪装 UA / 关闭自动化特征）
+    CM->>BR: 启动无头 Chrome（伪装 UA / 关闭自动化特征）
     BR->>BR: 先落地 zcode.z.ai 同源页，再注入求解页
     BR->>CDN: 加载 AliyunCaptcha.js
     BR->>ALI: initAliyunCaptcha + startTracelessVerification
@@ -234,8 +234,8 @@ sequenceDiagram
 - **缓存**:TTL 内复用;**并发去重**:同一时刻仅跑一个求解(`asyncio.Lock`);
   **重试**:`CAPTCHA_SOLVE_RETRIES`(默认 4)次。
 - 仅 zai + JWT 账号需要;API Key 账号走 `api.z.ai` 回退端点,无需验证码。
-- 曾用 Node + jsdom 模拟环境求解,后被风控识破(`verifyCode=F001` 环境风险拒绝),
-  故改为真实内核的无头 Chromium。
+- 曾用 Node + jsdom 与 Playwright 自带 Chromium 求解,均被风控识破(`verifyCode=F001`
+  环境风险拒绝),最终方案为 **真实 Chrome 二进制**（Docker 镜像内置 Google Chrome）。
 
 ---
 
@@ -282,7 +282,7 @@ meta(      key PK, value )      # admin_key / gateway_key / quota_refresh_interv
 │   ├── models.py          # Account / Status
 │   ├── store.py           # SQLite 持久化 + 轮询游标
 │   ├── agent.py           # Request Builder
-│   ├── captcha.py         # Captcha Manager + Solver（Playwright 无头 Chromium）
+│   ├── captcha.py         # Captcha Manager + Solver（Playwright + 真实 Chrome）
 │   ├── quota.py           # Quota Monitor
 │   ├── oauth.py           # OAuth Flow
 │   ├── auth_admin.py      # 鉴权依赖
