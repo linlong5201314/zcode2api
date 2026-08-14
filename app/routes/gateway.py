@@ -121,11 +121,12 @@ def _is_exhausted(status_code: int, text: str) -> bool:
     return status_code == 402
 
 
-def _mark(account: Account, status_value: str, error: str | None = None) -> None:
+def _mark(account: Account, status_value: str, error: str | None = None,
+          cooling_seconds: float | None = None) -> None:
     account.status = status_value
     account.last_error = error
     if status_value == Status.COOLING:
-        account.cooling_until = time.time() + settings.COOLING_SECONDS
+        account.cooling_until = time.time() + (cooling_seconds or settings.COOLING_SECONDS)
     store.update_account(account)
 
 
@@ -410,7 +411,9 @@ async def _relay(req_id: str, body: dict, incoming_headers: dict, port: int):
             continue
         return result
 
-    detail = "；".join(reasons[-3:]) if reasons else ""
+    detail = "；".join(dict.fromkeys(reasons)) if reasons else ""  # 去重保序，展示完整失败链
+    if len(detail) > 400:
+        detail = detail[:400] + "…"
     logs.req_err(req_id, f"无可用账号 / 额度均已耗尽（{detail}）")
     return JSONResponse(
         {"error": {"message": f"所有账号均不可用或额度已用完，请在后台检查账号状态"
@@ -520,7 +523,8 @@ async def _forward_once(req_id, account, body, payload, incoming_headers, verify
                 raise _AccountBad
 
             if status_code == 429:
-                _mark(account, Status.COOLING, "上游限流 429")
+                # 限流多为瞬时（RPM 峰值），短冷却即可，避免单账号被长时间雪藏
+                _mark(account, Status.COOLING, f"上游限流 429", cooling_seconds=60)
                 logs.warn(req_id, f"账号 {account.name} 被限流 429，切换下一个")
                 raise _AccountBad
 

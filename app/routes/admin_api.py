@@ -28,6 +28,24 @@ async def verify():
     return {"status": "ok"}
 
 
+@router.get("/captcha/check")
+async def captcha_check():
+    """诊断端点：实测一次人机校验求解，返回成功/失败原因（用于远程定位风控问题）。"""
+    from ..captcha import captcha_manager
+
+    t0 = time.monotonic()
+    try:
+        param = await captcha_manager.get_verify_param()
+        return {
+            "ok": True,
+            "elapsed": round(time.monotonic() - t0, 2),
+            "param_len": len(param or ""),
+            "param_head": (param or "")[:40],
+        }
+    except Exception as err:  # noqa: BLE001
+        return {"ok": False, "elapsed": round(time.monotonic() - t0, 2), "reason": str(err)[:300]}
+
+
 # ── 账号列表 + 概览统计 ──────────────────────────────────────────────────────
 @router.get("/accounts")
 async def list_accounts():
