@@ -41,9 +41,6 @@ MODEL_NAME_MAP = {
 # /v1/models 对外公布的可用模型（GLM-5.3 排第一作为客户端默认）
 AVAILABLE_MODELS = ["GLM-5.3", "GLM-5.2", "GLM-5-Turbo"]
 
-# 命中以下信号才认为账号额度用完（避免把普通 4xx 校验错误误判为额度耗尽）
-_EXHAUST_KEYWORDS = ("余额不足", "额度已用完", "quota exceeded", "out of quota")
-
 
 def _fix_thinking(body: dict) -> dict:
     """GLM-5.3 强制思考模式：客户端未显式开启时自动注入官方 thinking 格式。"""
@@ -119,12 +116,9 @@ def _is_captcha_error(text: str) -> bool:
 
 
 def _is_exhausted(status_code: int, text: str) -> bool:
-    if status_code == 402:
-        return True
-    if status_code in (401, 403, 429):  # 鉴权/限流另行处理，不按文本判定
-        return False
-    low = text.lower()
-    return any(k in low for k in _EXHAUST_KEYWORDS)
+    # 仅信任 402（Payment Required）；额度状态由后台 quota 监控按真实账单数据维护，
+    # 文本关键词容易把上游校验错误（如 thinking/quota 提示）误判为额度耗尽。
+    return status_code == 402
 
 
 def _mark(account: Account, status_value: str, error: str | None = None) -> None:
@@ -401,7 +395,7 @@ async def _relay(req_id: str, body: dict, incoming_headers: dict, port: int):
     provider = _detect_provider(body, incoming_headers)
     payload = json.dumps(body).encode("utf-8")
     tried: set[str] = set()
-    captcha_blocked = False
+    reasons: list[str] = []
 
     for _ in range(MAX_ACCOUNT_ATTEMPTS):
         account = store.select(provider, skip_ids=tried)
@@ -410,44 +404,48 @@ async def _relay(req_id: str, body: dict, incoming_headers: dict, port: int):
         tried.add(account.id)
         needs_captcha = provider == "zai" and account.mode == "jwt"
 
-        result = await _try_account(req_id, account, body, payload, incoming_headers, port, needs_captcha)
+        result = await _try_account(req_id, account, body, payload, incoming_headers, port,
+                                    needs_captcha, reasons)
         if result is _NEXT_ACCOUNT:
-            if needs_captcha and account.status == Status.ACTIVE:
-                captcha_blocked = True
             continue
         return result
 
-    hint = ""
-    if captcha_blocked:
-        hint = ("；上游人机校验未通过：当前服务器环境（浏览器指纹/数据中心 IP）被阿里云风控拒绝，"
-                "请改用真实 Chrome 运行网关或部署在住宅网络环境")
-    logs.req_err(req_id, "无可用账号 / 额度均已耗尽")
+    detail = "；".join(reasons[-3:]) if reasons else ""
+    logs.req_err(req_id, f"无可用账号 / 额度均已耗尽（{detail}）")
     return JSONResponse(
-        {"error": {"message": f"所有账号均不可用或额度已用完，请在后台检查账号状态{hint}",
+        {"error": {"message": f"所有账号均不可用或额度已用完，请在后台检查账号状态"
+                              + (f"（最近失败原因: {detail}）" if detail else ""),
                    "type": "no_available_account"}},
         status_code=503,
     )
 
 
-async def _try_account(req_id, account, body, payload, incoming_headers, port, needs_captcha):
+async def _try_account(req_id, account, body, payload, incoming_headers, port, needs_captcha,
+                       reasons: list[str] | None = None):
     """尝试用单个账号转发。
 
     降级链：JWT + 验证码 → JWT 不带验证参数直连 → API Key 回退端点（无需验证码）。
     """
+    reasons = reasons if reasons is not None else []
+
+    def _note(msg: str) -> None:
+        reasons.append(f"{account.name}: {msg}")
+
     if needs_captcha:
         try:
             verify_param = await captcha_manager.get_verify_param(port)
         except Exception as err:  # noqa: BLE001
             verify_param = None
-            logs.warn(req_id, f"人机校验求解失败，尝试不带验证参数直连: {err}")
+            _note(f"人机校验求解失败: {err}")
         try:
             return await _forward_once(req_id, account, body, payload, incoming_headers,
                                        verify_param, use_fallback=False, retries=MAX_CAPTCHA_RETRIES)
         except _CaptchaRejected:
-            logs.warn(req_id, f"账号 {account.name} 验证码连续失败，尝试不带验证参数直连")
+            _note("带验证码请求被上游拒绝")
         except _UpstreamError as err:
             return err.response
         except _AccountBad:
+            _note(f"账号不可用: {account.last_error or account.status}")
             return _NEXT_ACCOUNT
 
     # JWT 不带验证参数直连（上游可能已放宽人机校验）
@@ -455,10 +453,11 @@ async def _try_account(req_id, account, body, payload, incoming_headers, port, n
         return await _forward_once(req_id, account, body, payload, incoming_headers,
                                    None, use_fallback=False, retries=1)
     except _CaptchaRejected:
-        pass
+        _note("不带验证码被上游拒绝（captcha required）")
     except _UpstreamError as err:
         return err.response
     except _AccountBad:
+        _note(f"账号不可用: {account.last_error or account.status}")
         return _NEXT_ACCOUNT
 
     # API Key 回退端点（api.z.ai），无需验证码
@@ -469,9 +468,12 @@ async def _try_account(req_id, account, body, payload, incoming_headers, port, n
         except _UpstreamError as err:
             return err.response
         except _AccountBad:
+            _note(f"API Key 回退失败: {account.last_error or account.status}")
             return _NEXT_ACCOUNT
         except _CaptchaRejected:  # noqa: BLE001
-            pass
+            _note("API Key 回退被拒（captcha required）")
+    else:
+        _note("无 API Key 可回退")
 
     logs.req_err(req_id, f"账号 {account.name} 所有转发路径均失败")
     return _NEXT_ACCOUNT
