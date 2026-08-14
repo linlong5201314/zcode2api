@@ -7,8 +7,9 @@
 
 ```bash
 pip install -r requirements.txt
-python -m playwright install chromium   # 无痕验证求解用无头 Chromium（首次）
 cp .env.example .env                     # 按需修改
+# 无痕验证求解需要真实 Chrome（Playwright 自带 Chromium 会被阿里云风控识破）：
+# 本机运行建议在 .env 设置 ZCODE_CAPTCHA_BROWSER_CHANNEL=chrome（或 msedge），复用系统浏览器。
 
 python main.py serve                     # 启动网关 + 后台 UI（默认端口 3000）
 ```
@@ -99,17 +100,17 @@ docker run -d --name zcode2api -p 3000:3000 \
 ## 无痕验证（无头 Chromium）
 
 Coding Plan（JWT）模式调用 `zcode.z.ai` 上游时需要阿里云无痕验证参数
-（请求头 `X-Aliyun-Captcha-Verify-Param`）。网关用 **Playwright 无头 Chromium**
+（请求头 `X-Aliyun-Captcha-Verify-Param`）。网关用 **Playwright + 真实 Chrome**（无头模式）
 运行阿里云官方无痕 SDK 来求得该参数。
 
-- 求解逻辑在 `app/captcha.py`：启动无头 Chromium（伪装普通 Chrome UA、关闭自动化特征），
+- 求解逻辑在 `app/captcha.py`：启动无头 Chrome（伪装普通 Chrome UA、关闭自动化特征），
   在 `zcode.z.ai` 同源页面中执行 `startTracelessVerification`，捕获成功回调输出 `verifyParam`。
+- **必须使用真实 Chrome 二进制**：Playwright 自带 Chromium 与 Node+jsdom 模拟环境都会被
+  阿里云风控识破（返回 `verifyCode=F001` 环境风险拒绝）。Docker 镜像已内置 Google Chrome 并
+  默认 `ZCODE_CAPTCHA_BROWSER_CHANNEL=chrome`；本机运行可用 `chrome` / `msedge` 复用系统浏览器。
 - 内置结果缓存（默认 45s）、并发去重与失败重试；验证码配置从上游 `client/configs` 拉取。
 - `verifyParam` 实为 `base64(JSON{certifyId, sceneId, isSign, securityToken})`，由阿里云服务端签发。
 - 仅 Coding Plan（JWT）账号需要；API Key 账号走 `api.z.ai` 回退端点，无需验证码。
-
-> 早期版本曾用 Node + jsdom 模拟浏览器环境，后被阿里云风控识破
-> （无痕验证返回 `verifyCode=F001` 环境风险拒绝），因此改用真实内核的无头 Chromium。
 
 ## 命令行
 
@@ -160,7 +161,7 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 │   └── statics/           # app.css, auth.js, toast.js, header.js, admin/*.html
 ├── main.py                # 命令行入口（serve / login / accounts / quota ...）
 ├── data/                  # 运行时生成：accounts.db (SQLite)
-├── Dockerfile             # 镜像（Python + Playwright Chromium）
+├── Dockerfile             # 镜像（Python + Google Chrome）
 ├── docker-compose.yml     # 一键部署
 ├── .dockerignore
 ├── .github/workflows/     # docker-build.yml（仅构建验证，不推送 Docker Hub）

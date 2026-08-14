@@ -376,6 +376,7 @@ async def _relay(req_id: str, body: dict, incoming_headers: dict, port: int):
     provider = _detect_provider(body, incoming_headers)
     payload = json.dumps(body).encode("utf-8")
     tried: set[str] = set()
+    captcha_blocked = False
 
     for _ in range(MAX_ACCOUNT_ATTEMPTS):
         account = store.select(provider, skip_ids=tried)
@@ -386,12 +387,19 @@ async def _relay(req_id: str, body: dict, incoming_headers: dict, port: int):
 
         result = await _try_account(req_id, account, body, payload, incoming_headers, port, needs_captcha)
         if result is _NEXT_ACCOUNT:
+            if needs_captcha and account.status == Status.ACTIVE:
+                captcha_blocked = True
             continue
         return result
 
+    hint = ""
+    if captcha_blocked:
+        hint = ("；上游人机校验未通过：当前服务器环境（浏览器指纹/数据中心 IP）被阿里云风控拒绝，"
+                "请改用真实 Chrome 运行网关或部署在住宅网络环境")
     logs.req_err(req_id, "无可用账号 / 额度均已耗尽")
     return JSONResponse(
-        {"error": {"message": "所有账号均不可用或额度已用完，请在后台检查账号状态", "type": "no_available_account"}},
+        {"error": {"message": f"所有账号均不可用或额度已用完，请在后台检查账号状态{hint}",
+                   "type": "no_available_account"}},
         status_code=503,
     )
 
@@ -472,7 +480,7 @@ async def _forward_once(req_id, account, body, payload, incoming_headers, verify
             await cm.__aexit__(None, None, None)
             await client.aclose()
 
-            if status_code == 403 and _is_captcha_error(text):
+            if _is_captcha_error(text) and status_code in (400, 401, 403):
                 if verify_param:
                     captcha_manager.invalidate()
                     logs.warn(req_id, f"账号 {account.name} 验证码失效，刷新重试")

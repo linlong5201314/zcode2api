@@ -1,11 +1,12 @@
-# zcode2api — Python(FastAPI) + Playwright 无头 Chromium（无痕验证求解器）
+# zcode2api — Python(FastAPI) + Google Chrome（无痕验证求解器）
 FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     ZCODE_HOST=0.0.0.0 \
     ZCODE_PORT=3000 \
-    ZCODE_DATA_DIR=/data
+    ZCODE_DATA_DIR=/data \
+    ZCODE_CAPTCHA_BROWSER_CHANNEL=chrome
 
 WORKDIR /app
 
@@ -13,8 +14,20 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
-# ── Chromium（无痕验证求解：Playwright 无头浏览器运行阿里云无痕 SDK）────────
-RUN playwright install --with-deps chromium
+# ── 系统依赖（真实 Chrome 所需的运行库，仅装依赖不下载浏览器）──────────────
+RUN playwright install-deps chromium
+
+# ── Google Chrome（无痕验证必须用真实 Chrome 二进制：
+#    Playwright 自带 Chromium 会被阿里云风控识破，返回 verifyCode=F001）───────
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl gnupg \
+    && curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
+    && apt-get purge -y curl gnupg \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
 
 # ── 应用源码 ────────────────────────────────────────────────────────────────
 COPY . .

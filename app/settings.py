@@ -54,10 +54,12 @@ OAUTH_REDIRECT_URI = os.getenv("ZCODE_OAUTH_REDIRECT_URI", "https://zcode.z.ai/l
 CAPTCHA_CACHE_TTL = _int("CAPTCHA_CACHE_TTL", 45_000)          # ms
 CAPTCHA_CONFIG_CACHE_TTL = _int("CAPTCHA_CONFIG_CACHE_TTL", 600_000)  # ms
 
-# 验证码求解（Playwright 无头 Chromium 运行阿里云无痕 SDK）
+# 验证码求解（Playwright 无头浏览器运行阿里云无痕 SDK）
 CAPTCHA_SOLVE_RETRIES = _int("ZCODE_CAPTCHA_RETRIES", 4)
 CAPTCHA_SOLVE_TIMEOUT = _int("ZCODE_CAPTCHA_TIMEOUT", 40)  # 每次求解超时（秒）
-# 留空使用 Playwright 自带 Chromium；本地调试可设 "chrome" / "msedge" 复用系统浏览器
+# 留空使用 Playwright 自带 Chromium（会被阿里云风控识破，仅限调试）；
+# 生产环境必须用真实 Chrome：Docker 镜像已内置 Google Chrome 并默认 "chrome"，
+# 本机运行可设 "msedge" / "chrome" 复用系统浏览器。
 CAPTCHA_BROWSER_CHANNEL = os.getenv("ZCODE_CAPTCHA_BROWSER_CHANNEL", "") or None
 
 # ── 用量监控 ─────────────────────────────────────────────────────────────────
