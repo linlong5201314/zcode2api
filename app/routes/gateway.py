@@ -493,7 +493,10 @@ async def _forward_once(req_id, account, body, payload, incoming_headers, verify
             logs.warn(req_id, f"账号 {account.name} 凭证无效，切换下一个")
             raise _AccountBad from err
 
-        client = httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=None, write=120.0, pool=30.0))
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=30.0, read=None, write=120.0, pool=30.0),
+            proxy=settings.UPSTREAM_PROXY,
+        )
         cm = client.stream("POST", url, headers=headers, content=payload)
         try:
             resp = await cm.__aenter__()

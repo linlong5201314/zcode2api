@@ -53,6 +53,8 @@ OAUTH_REDIRECT_URI = os.getenv("ZCODE_OAUTH_REDIRECT_URI", "https://zcode.z.ai/l
 # ── 验证码缓存 ───────────────────────────────────────────────────────────────
 CAPTCHA_CACHE_TTL = _int("CAPTCHA_CACHE_TTL", 45_000)          # ms
 CAPTCHA_CONFIG_CACHE_TTL = _int("CAPTCHA_CONFIG_CACHE_TTL", 600_000)  # ms
+# 求解失败结果也缓存一段时间，避免每个请求都重复跑注定失败的求解（数据中心 IP 被风控拒绝时尤其重要）
+CAPTCHA_FAIL_CACHE_TTL = _int("ZCODE_CAPTCHA_FAIL_TTL", 60_000)  # ms
 
 # 验证码求解（Playwright 无头浏览器运行阿里云无痕 SDK）
 CAPTCHA_SOLVE_RETRIES = _int("ZCODE_CAPTCHA_RETRIES", 4)
@@ -89,6 +91,10 @@ ZCODE_BILLING_BASE = os.getenv(
     "ZAI_BILLING_URL",
     "https://zcode.z.ai/api/v1/zcode-plan",
 ).rstrip("/")
+
+# 可选：为上游请求与验证码求解统一走住宅代理（数据中心 IP 会被阿里云风控 F001 拒绝）。
+# 形如 http://user:pass@host:port 或 socks5://host:port；留空直连。
+UPSTREAM_PROXY = os.getenv("ZCODE_UPSTREAM_PROXY", "") or None
 
 # ── GLM-5.3 强制思考模式 ─────────────────────────────────────────────────────
 # 客户端未显式开启 thinking 时，网关自动注入 {"type":"enabled","budget_tokens":N}。

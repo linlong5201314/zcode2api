@@ -50,6 +50,8 @@ class CaptchaManager:
     def __init__(self) -> None:
         self._cached: str | None = None
         self._cached_at: float = 0.0
+        self._failed_at: float = 0.0
+        self._failed_err: str | None = None
         self._lock = asyncio.Lock()
         self._config_cache: dict | None = None
         self._config_cache_at: float = 0.0
@@ -80,18 +82,30 @@ class CaptchaManager:
         now = time.time() * 1000
         if self._cached and now - self._cached_at < settings.CAPTCHA_CACHE_TTL:
             return self._cached
+        # 失败也短缓存：数据中心 IP 被风控拒绝时，避免每个请求都重跑注定失败的求解
+        if self._failed_at and now - self._failed_at < settings.CAPTCHA_FAIL_CACHE_TTL:
+            wait = max(0, int((settings.CAPTCHA_FAIL_CACHE_TTL - (now - self._failed_at)) / 1000))
+            raise RuntimeError(f"验证码求解失败（{wait}s 内不重试）: {self._failed_err}")
 
         async with self._lock:
             # 二次检查：等锁期间可能已被其他请求填充
             if self._cached and time.time() * 1000 - self._cached_at < settings.CAPTCHA_CACHE_TTL:
                 return self._cached
+            if self._failed_at and time.time() * 1000 - self._failed_at < settings.CAPTCHA_FAIL_CACHE_TTL:
+                raise RuntimeError(f"验证码求解失败（短时内不重试）: {self._failed_err}")
 
             config = await self.fetch_config()
             if config.get("enabled") is False:
                 return ""  # 上游已关闭人机校验，直接放行
-            param = await self._solve(config)
+            try:
+                param = await self._solve(config)
+            except Exception as err:  # noqa: BLE001
+                self._failed_at = time.time() * 1000
+                self._failed_err = str(err)[:300]
+                raise
             self._cached = param
             self._cached_at = time.time() * 1000
+            self._failed_at = 0.0
             return param
 
     async def _solve(self, config: dict) -> str:
@@ -124,15 +138,18 @@ class CaptchaManager:
         received: list[str] = []
 
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                channel=settings.CAPTCHA_BROWSER_CHANNEL,
-                args=[
+            launch_kwargs = {
+                "headless": True,
+                "channel": settings.CAPTCHA_BROWSER_CHANNEL,
+                "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-blink-features=AutomationControlled",
                 ],
-            )
+            }
+            if settings.UPSTREAM_PROXY:
+                launch_kwargs["proxy"] = {"server": settings.UPSTREAM_PROXY}
+            browser = await pw.chromium.launch(**launch_kwargs)
             try:
                 page = await browser.new_page(
                     user_agent=_CHROME_UA, viewport={"width": 1280, "height": 720}
