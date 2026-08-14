@@ -1,45 +1,69 @@
-"""Z.AI OAuth 登录流程。
+"""Z.AI OAuth 登录流程（授权码模式，与 zcode.z.ai 网页端同款）。
 
-主要供 CLI `login zai` 使用：发起 OAuth → 轮询 → 兑换 API Key。
+真实流程（逆向自 zcode.z.ai 前端）：
+1. 构造授权链接 https://chat.z.ai/api/oauth/authorize?...，用户在浏览器登录 Z.AI；
+2. 登录成功后浏览器携带 code/state 重定向回 redirect_uri（网关回调或本地端口）；
+3. 服务端 POST https://zcode.z.ai/api/v1/oauth/token 兑换凭证：
+   data.token = Coding Plan JWT（上游对话用），data.zai.access_token = 业务 token。
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import secrets
+from urllib.parse import urlencode
 
 import httpx
 
+AUTHORIZE_URL = "https://chat.z.ai/api/oauth/authorize"
+TOKEN_URL = "https://zcode.z.ai/api/v1/oauth/token"
+# zcode.z.ai 网页端内置的公开 client_id
+CLIENT_ID = "client_P8X5CMWmlaRO9gyO-KSqtg"
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
 
 class ZaiAuthFlow:
-    def __init__(self, api_base: str = "https://zcode.z.ai/api/v1") -> None:
-        self.api_base = api_base
-        self.poll_token = secrets.token_hex(32)
+    def __init__(self, redirect_uri: str) -> None:
+        self.redirect_uri = redirect_uri
+        self.nonce = secrets.token_hex(16)
+        # state 为 base64url(JSON)，格式对齐网页端（nonce + redirect_uri）
+        self.state = _b64url(
+            json.dumps({"nonce": self.nonce, "redirect_uri": redirect_uri}).encode()
+        )
 
-    async def init(self) -> tuple[str, str]:
+    def authorize_url(self) -> str:
+        return f"{AUTHORIZE_URL}?" + urlencode({
+            "redirect_uri": self.redirect_uri,
+            "response_type": "code",
+            "client_id": CLIENT_ID,
+            "state": self.state,
+        })
+
+    async def exchange(self, code: str, state: str) -> dict:
+        """授权码 → {token(=Coding Plan JWT), zai.access_token, user, expires_in}。"""
         async with httpx.AsyncClient(timeout=30) as client:
             res = await client.post(
-                f"{self.api_base}/oauth/cli/init",
-                headers={
-                    "Authorization": f"Bearer {self.poll_token}",
-                    "Content-Type": "application/json",
-                },
-                json={"provider": "zai"},
+                TOKEN_URL,
+                headers={"Content-Type": "application/json"},
+                json={"code": code, "redirect_uri": self.redirect_uri, "state": state},
             )
-        res.raise_for_status()
-        data = res.json().get("data") or {}
-        flow_id, authorize_url = data.get("flow_id"), data.get("authorize_url")
-        if not flow_id or not authorize_url:
-            raise RuntimeError("返回的 OAuth 流程数据不完整")
-        return flow_id, authorize_url
-
-    async def poll(self, flow_id: str) -> dict:
-        async with httpx.AsyncClient(timeout=30) as client:
-            res = await client.get(
-                f"{self.api_base}/oauth/cli/poll/{flow_id}",
-                headers={"Authorization": f"Bearer {self.poll_token}"},
-            )
-        res.raise_for_status()
-        return res.json().get("data") or {}
+        body = {}
+        try:
+            body = res.json()
+        except Exception:  # noqa: BLE001 - 非 JSON 响应退回 HTTP 状态码
+            pass
+        if not body and not res.is_success:
+            res.raise_for_status()
+        if body.get("code") != 0:
+            raise RuntimeError(body.get("msg") or f"token 兑换失败 (HTTP {res.status_code})")
+        data = body.get("data") or {}
+        if not data.get("token"):
+            raise RuntimeError("返回数据中不含 Coding Plan JWT")
+        return data
 
     async def exchange_api_key(self, access_token: str) -> str:
         """OAuth access_token → 业务 token → 机构/项目 → API Key。"""

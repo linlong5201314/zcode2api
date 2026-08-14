@@ -123,6 +123,8 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 | `ZCODE_NODE_PATH` | node | 无痕验证求解器使用的 Node 可执行文件 |
 | `ZCODE_CAPTCHA_TIMEOUT` | 40 | 单次验证码求解超时（秒）|
 | `ZCODE_CAPTCHA_RETRIES` | 4 | 验证码求解失败重试次数 |
+| `ZCODE_PUBLIC_URL` | 自动推断 | 网关对外可达地址（如 `https://xxx.up.railway.app`），OAuth 回调地址基于它生成；反代场景推断不准时手动指定 |
+| `ZCODE_LOGIN_PORT` | 18365 | CLI `login zai` 本地回调监听端口 |
 | `CAPTCHA_CACHE_TTL` | 45000 | 验证码缓存时长 (ms) |
 | `ZAI_UPSTREAM_URL` / `ZAI_FALLBACK_URL` / `BIGMODEL_UPSTREAM_URL` | — | 上游端点 |
 

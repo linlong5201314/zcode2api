@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import secrets
 import time
 
-from fastapi import APIRouter, Body, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from ..auth_admin import verify_admin_key
 from ..models import PROVIDERS, Status
@@ -14,9 +16,23 @@ from ..quota import fetch_quota, refresh_accounts
 from ..store import store
 
 router = APIRouter(prefix="/admin/api", dependencies=[Depends(verify_admin_key)])
+# OAuth 回调是浏览器从 Z.AI 跳回来的落地页，无法携带后台密钥，
+# 安全性由 state 中的随机 nonce 保证，因此挂在无鉴权路由上。
+public_router = APIRouter(prefix="/admin/api")
 
-# 进行中的 OAuth 登录流程（flow_id -> ZaiAuthFlow），需跨请求保留 poll_token
+# 进行中的 OAuth 登录流程（flow_id -> ZaiAuthFlow），回调写入结果、轮询读取结果
 _login_flows: dict[str, ZaiAuthFlow] = {}
+_LOGIN_FLOW_TTL = 15 * 60  # 登录流程最长保留时长（秒）
+
+
+def _public_base(request: Request) -> str:
+    """推断网关对外可达的 base URL（Railway 等反代场景取 Host / X-Forwarded-Proto）。"""
+    custom = os.getenv("ZCODE_PUBLIC_URL", "").strip()
+    if custom:
+        return custom.rstrip("/")
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
 
 
 # ── 鉴权探针 ─────────────────────────────────────────────────────────────────
@@ -147,59 +163,83 @@ async def refresh_one(account_id: str):
 
 # ── OAuth 登录（Z.AI）────────────────────────────────────────────────────────
 @router.post("/login/start")
-async def login_start():
-    """发起 Z.AI OAuth，返回授权链接供前端展示。"""
-    flow = ZaiAuthFlow()
-    try:
-        flow_id, authorize_url = await flow.init()
-    except Exception as err:  # noqa: BLE001
-        raise HTTPException(502, f"登录初始化失败: {err}")
+async def login_start(request: Request):
+    """构造授权链接（授权码模式），回调地址为网关自身的 /admin/api/login/callback。"""
+    now = time.time()
+    for fid in [fid for fid, f in _login_flows.items() if now - f.created > _LOGIN_FLOW_TTL]:
+        _login_flows.pop(fid, None)
+
+    flow = ZaiAuthFlow(f"{_public_base(request)}/admin/api/login/callback")
+    flow_id = secrets.token_hex(8)
+    flow.created = now
+    flow.status = "pending"
     _login_flows[flow_id] = flow
-    return {"flow_id": flow_id, "authorize_url": authorize_url}
+    return {"flow_id": flow_id, "authorize_url": flow.authorize_url()}
+
+
+@public_router.get("/login/callback")
+async def login_callback(code: str = "", state: str = "", error: str = ""):
+    """Z.AI 授权后的浏览器落地页：兑换凭证、导入账号池并展示结果。"""
+    flow = next((f for f in _login_flows.values() if f.state == state), None)
+    if not flow:
+        return HTMLResponse("<h3>登录会话不存在或已过期，请回到后台重新发起登录。</h3>", status_code=404)
+
+    if error:
+        flow.status, flow.message = "failed", f"授权失败: {error}"
+    elif not code:
+        flow.status, flow.message = "failed", "回调中缺少授权码"
+    else:
+        try:
+            data = await flow.exchange(code, state)
+        except Exception as err:  # noqa: BLE001
+            flow.status, flow.message = "failed", f"token 兑换失败: {err}"
+
+        if flow.status != "failed":
+            # 授权成功：保存 Coding Plan JWT，并尝试兑换 API Key 作为同账号回退
+            zcode_jwt = data.get("token")
+            access_token = (data.get("zai") or {}).get("access_token")
+            account = None
+            if zcode_jwt:
+                account = store.add_account("zai", "oauth-login", zcode_jwt)
+            if access_token:
+                try:
+                    api_key = await flow.exchange_api_key(access_token)
+                    if account is not None:
+                        account.api_key = api_key
+                        store.update_account(account)
+                    else:
+                        account = store.add_account("zai", "oauth-login", api_key)
+                except Exception:  # noqa: BLE001 - 兑换失败不影响 JWT 已入池
+                    pass
+            if account is None:
+                flow.status, flow.message = "failed", "未能从授权结果中获取凭证"
+            else:
+                if account.mode == "jwt":
+                    await refresh_accounts([account])
+                flow.status, flow.account = "ready", account.public_view()
+
+    ok = flow.status == "ready"
+    return HTMLResponse(
+        "<html><head><meta charset='utf-8'><title>zcode2api 登录</title></head>"
+        f"<body style='font-family:sans-serif;text-align:center;padding-top:80px'>"
+        f"<h2>{'✅ 登录成功，已导入账号池' if ok else '❌ ' + (flow.message or '登录失败')}</h2>"
+        "<p>请返回 zcode2api 后台页面查看。</p></body></html>",
+        status_code=200,
+    )
 
 
 @router.get("/login/poll/{flow_id}")
 async def login_poll(flow_id: str):
-    """轮询授权状态；成功后自动兑换凭证并加入账号池。"""
+    """前端轮询授权状态；结果已由 /login/callback 写入。"""
     flow = _login_flows.get(flow_id)
     if not flow:
         raise HTTPException(404, "登录会话不存在或已过期")
-    try:
-        data = await flow.poll(flow_id)
-    except Exception:  # noqa: BLE001 - 单次网络抖动按 pending 处理
+    if flow.status == "pending":
         return {"status": "pending"}
-
-    state = data.get("status")
-    if state == "failed":
-        _login_flows.pop(flow_id, None)
-        return {"status": "failed"}
-    if state != "ready":
-        return {"status": "pending"}
-
-    # 授权成功：保存 Coding Plan JWT，并尝试兑换 API Key 作为同账号回退
-    zcode_jwt = data.get("token")
-    access_token = (data.get("zai") or {}).get("access_token")
-    account = None
-    if zcode_jwt:
-        account = store.add_account("zai", "oauth-login", zcode_jwt)
-    if access_token:
-        try:
-            api_key = await flow.exchange_api_key(access_token)
-            if account is not None:
-                account.api_key = api_key
-                store.update_account(account)
-            else:
-                account = store.add_account("zai", "oauth-login", api_key)
-        except Exception:  # noqa: BLE001 - 兑换失败不影响 JWT 已入池
-            pass
-
     _login_flows.pop(flow_id, None)
-    if account is None:
-        return {"status": "failed", "message": "未能从授权结果中获取凭证"}
-
-    if account.mode == "jwt":
-        await refresh_accounts([account])
-    return {"status": "ready", "account": account.public_view()}
+    if flow.status == "ready":
+        return {"status": "ready", "account": getattr(flow, "account", None)}
+    return {"status": "failed", "message": getattr(flow, "message", None)}
 
 
 # ── 设置 ─────────────────────────────────────────────────────────────────────
