@@ -217,8 +217,8 @@ async def chat_completions(request: Request):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
-    text, usage = await _collect_anthropic(resp.body_iterator)
-    return JSONResponse(_openai_response(str(body.get("model") or "gpt-4o"), text, usage))
+    text, thinking, usage = await _collect_anthropic(resp.body_iterator)
+    return JSONResponse(_openai_response(str(body.get("model") or "gpt-4o"), text, thinking, usage))
 
 
 @router.post("/v1/v1/chat/completions", include_in_schema=False, dependencies=[Depends(verify_gateway_key)])
@@ -292,8 +292,11 @@ def _openai_finish(stop_reason: str | None) -> str:
     return "stop"
 
 
-def _openai_response(model: str, text: str, usage: dict) -> dict:
+def _openai_response(model: str, text: str, thinking: str, usage: dict) -> dict:
     now = int(time.time())
+    message: dict = {"role": "assistant", "content": text}
+    if thinking:
+        message["reasoning_content"] = thinking  # DeepSeek 风格，兼容支持思考展示的客户端
     return {
         "id": f"chatcmpl-{secrets.token_hex(12)}",
         "object": "chat.completion",
@@ -301,7 +304,7 @@ def _openai_response(model: str, text: str, usage: dict) -> dict:
         "model": model,
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": text},
+            "message": message,
             "finish_reason": _openai_finish(usage.get("stop_reason")),
         }],
         "usage": {
@@ -328,20 +331,25 @@ def _openai_error(resp) -> JSONResponse:
     )
 
 
-async def _collect_anthropic(body_iter) -> tuple[str, dict]:
-    """聚合 Anthropic SSE 流：返回 (文本, {input_tokens, output_tokens, stop_reason})。"""
+async def _collect_anthropic(body_iter) -> tuple[str, str, dict]:
+    """聚合 Anthropic SSE 流：返回 (正文, 思考内容, 用量信息)。"""
     parts: list[str] = []
+    thinking: list[str] = []
     usage: dict = {}
     async for raw in body_iter:
         for event in _parse_anthropic_sse(raw.decode("utf-8", "ignore")):
-            if event[0] == "content_block_delta" and (event[1].get("delta") or {}).get("type") == "text_delta":
-                parts.append((event[1].get("delta") or {}).get("text") or "")
+            delta = event[1].get("delta") or {}
+            if event[0] == "content_block_delta":
+                if delta.get("type") == "text_delta":
+                    parts.append(delta.get("text") or "")
+                elif delta.get("type") == "thinking_delta":
+                    thinking.append(delta.get("thinking") or "")
             elif event[0] == "message_start":
                 usage["input_tokens"] = ((event[1].get("message") or {}).get("usage") or {}).get("input_tokens", 0)
             elif event[0] == "message_delta":
                 usage["output_tokens"] = (event[1].get("usage") or {}).get("output_tokens", 0)
                 usage["stop_reason"] = (event[1].get("delta") or {}).get("stop_reason")
-    return "".join(parts), usage
+    return "".join(parts), "".join(thinking), usage
 
 
 async def _openai_sse(body_iter, model: str):
@@ -360,11 +368,18 @@ async def _openai_sse(body_iter, model: str):
 
     async for raw in body_iter:
         for event, data in _parse_anthropic_sse(raw.decode("utf-8", "ignore")):
-            if event == "content_block_delta" and (data.get("delta") or {}).get("type") == "text_delta":
-                if first:
-                    first = False
-                    yield _chunk({"role": "assistant", "content": ""}, None)
-                yield _chunk({"content": (data.get("delta") or {}).get("text") or ""}, None)
+            if event == "content_block_delta":
+                delta = data.get("delta") or {}
+                if delta.get("type") == "text_delta":
+                    if first:
+                        first = False
+                        yield _chunk({"role": "assistant", "content": ""}, None)
+                    yield _chunk({"content": delta.get("text") or ""}, None)
+                elif delta.get("type") == "thinking_delta":
+                    if first:
+                        first = False
+                        yield _chunk({"role": "assistant", "content": ""}, None)
+                    yield _chunk({"reasoning_content": delta.get("thinking") or ""}, None)
             elif event == "message_delta":
                 stop_reason = (data.get("delta") or {}).get("stop_reason") or stop_reason
 

@@ -1,19 +1,23 @@
-"""验证码求解（无头 Chromium）。
+"""验证码求解（无头 Chrome）。
 
 Z.AI 上游按环境做人机校验（阿里云无痕验证），需要 X-Aliyun-Captcha-Verify-Param。
 原 Node + jsdom 模拟浏览器环境的方案已被风控识破（verifyCode=F001 环境风险拒绝），
-现改为 Playwright 无头 Chromium 运行官方无痕 SDK 求解。
+现改为 Playwright 无头浏览器运行官方无痕 SDK 求解，且优先复用本机安装的真实
+Chrome / Edge（自带 Chromium 同样会被风控识破）。
 
-- 缓存：求得的 verifyParam 在 TTL 内复用
+- 缓存：求得的 verifyParam 在 TTL 内复用；TTL 过期后先返回旧值并后台刷新（宽限期）
 - 并发：同一时刻只跑一个求解进程，其余请求等待后命中缓存
-- 重试：单次求解偶发失败时自动重试
+- 重试：单次求解偶发失败时自动重试；连续失败会短时熔断，避免每个请求都白等
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import sys
 import time
+from pathlib import Path
 
 import httpx
 from playwright.async_api import async_playwright
@@ -25,6 +29,37 @@ _CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+
+
+def _detect_browser_channel() -> str | None:
+    """探测本机真实浏览器，返回 playwright channel（chrome / msedge），无则 None。"""
+    if sys.platform == "win32":
+        candidates = [
+            (Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"), "chrome"),
+            (Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"), "chrome"),
+            (Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"), "msedge"),
+            (Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"), "msedge"),
+        ]
+        for path, channel in candidates:
+            if path.exists():
+                return channel
+        return None
+    if sys.platform == "darwin":
+        if Path("/Applications/Google Chrome.app").exists():
+            return "chrome"
+        if Path("/Applications/Microsoft Edge.app").exists():
+            return "msedge"
+        return None
+    # Linux：PATH 中有官方 Chrome 包即用
+    if shutil.which("google-chrome-stable") or shutil.which("google-chrome"):
+        return "chrome"
+    if shutil.which("microsoft-edge"):
+        return "msedge"
+    return None
+
+
+# 显式配置优先，否则自动探测（真 Chrome/Edge 优先，自带 Chromium 兜底）
+BROWSER_CHANNEL = settings.CAPTCHA_BROWSER_CHANNEL or _detect_browser_channel()
 
 _SOLVER_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 <script src="https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js"></script>
@@ -52,6 +87,7 @@ class CaptchaManager:
         self._cached_at: float = 0.0
         self._failed_at: float = 0.0
         self._failed_err: str | None = None
+        self._refreshing: bool = False
         self._lock = asyncio.Lock()
         self._config_cache: dict | None = None
         self._config_cache_at: float = 0.0
@@ -80,8 +116,16 @@ class CaptchaManager:
     # ── 求解 ─────────────────────────────────────────────────────────────────
     async def get_verify_param(self, port: int | None = None) -> str:
         now = time.time() * 1000
-        if self._cached and now - self._cached_at < settings.CAPTCHA_CACHE_TTL:
-            return self._cached
+        if self._cached:
+            age = now - self._cached_at
+            if age < settings.CAPTCHA_CACHE_TTL:
+                return self._cached
+            # 宽限期内先返回旧值并后台刷新，避免请求同步等待求解；
+            # 若旧值被上游拒绝，转发层会走 invalidate + 重试兜底
+            if age < settings.CAPTCHA_STALE_GRACE and not self._refreshing:
+                self._refreshing = True
+                asyncio.create_task(self._refresh_background())
+                return self._cached
         # 失败也短缓存：数据中心 IP 被风控拒绝时，避免每个请求都重跑注定失败的求解
         if self._failed_at and now - self._failed_at < settings.CAPTCHA_FAIL_CACHE_TTL:
             wait = max(0, int((settings.CAPTCHA_FAIL_CACHE_TTL - (now - self._failed_at)) / 1000))
@@ -89,9 +133,10 @@ class CaptchaManager:
 
         async with self._lock:
             # 二次检查：等锁期间可能已被其他请求填充
-            if self._cached and time.time() * 1000 - self._cached_at < settings.CAPTCHA_CACHE_TTL:
+            now = time.time() * 1000
+            if self._cached and now - self._cached_at < settings.CAPTCHA_CACHE_TTL:
                 return self._cached
-            if self._failed_at and time.time() * 1000 - self._failed_at < settings.CAPTCHA_FAIL_CACHE_TTL:
+            if self._failed_at and now - self._failed_at < settings.CAPTCHA_FAIL_CACHE_TTL:
                 raise RuntimeError(f"验证码求解失败（短时内不重试）: {self._failed_err}")
 
             config = await self.fetch_config()
@@ -107,6 +152,22 @@ class CaptchaManager:
             self._cached_at = time.time() * 1000
             self._failed_at = 0.0
             return param
+
+    async def _refresh_background(self) -> None:
+        """后台刷新验证码参数（宽限期触发）。"""
+        try:
+            async with self._lock:
+                config = await self.fetch_config()
+                if config.get("enabled") is False:
+                    return
+                param = await self._solve(config)
+                self._cached = param
+                self._cached_at = time.time() * 1000
+                self._failed_at = 0.0
+        except Exception as err:  # noqa: BLE001
+            logs.warn("captcha", f"后台刷新失败（继续用旧参数）: {str(err)[:150]}")
+        finally:
+            self._refreshing = False
 
     async def _solve(self, config: dict) -> str:
         scene = config.get("sceneId") or "11xygtvd"
@@ -140,7 +201,7 @@ class CaptchaManager:
         async with async_playwright() as pw:
             launch_kwargs = {
                 "headless": True,
-                "channel": settings.CAPTCHA_BROWSER_CHANNEL,
+                "channel": BROWSER_CHANNEL,
                 "args": [
                     "--no-sandbox",
                     "--disable-dev-shm-usage",

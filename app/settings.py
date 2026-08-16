@@ -53,6 +53,8 @@ OAUTH_REDIRECT_URI = os.getenv("ZCODE_OAUTH_REDIRECT_URI", "https://zcode.z.ai/l
 # ── 验证码缓存 ───────────────────────────────────────────────────────────────
 CAPTCHA_CACHE_TTL = _int("CAPTCHA_CACHE_TTL", 45_000)          # ms
 CAPTCHA_CONFIG_CACHE_TTL = _int("CAPTCHA_CONFIG_CACHE_TTL", 600_000)  # ms
+# TTL 过期后的宽限期：期间直接返回旧参数并后台刷新，避免请求同步等待求解
+CAPTCHA_STALE_GRACE = _int("ZCODE_CAPTCHA_STALE_GRACE", 300_000)  # ms
 # 求解失败结果也缓存一段时间，避免每个请求都重复跑注定失败的求解（数据中心 IP 被风控拒绝时尤其重要）
 CAPTCHA_FAIL_CACHE_TTL = _int("ZCODE_CAPTCHA_FAIL_TTL", 60_000)  # ms
 

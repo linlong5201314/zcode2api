@@ -8,11 +8,26 @@
 ```bash
 pip install -r requirements.txt
 cp .env.example .env                     # 按需修改
-# 无痕验证求解需要真实 Chrome（Playwright 自带 Chromium 会被阿里云风控识破）：
-# 本机运行建议在 .env 设置 ZCODE_CAPTCHA_BROWSER_CHANNEL=chrome（或 msedge），复用系统浏览器。
+# 无痕验证求解会自动探测并优先使用本机真实 Chrome / Edge（无需配置）；
+# Playwright 自带 Chromium 会被阿里云风控识破，仅作无浏览器时的兜底。
 
 python main.py serve                     # 启动网关 + 后台 UI（默认端口 3000）
 ```
+
+> Windows 用户可直接双击 `start_windows.bat` 一键启动（自动建虚拟环境、装依赖）。
+
+### 本地运行（推荐）与内网穿透
+
+阿里云无痕验证按 IP 信誉判定，**数据中心/云服务器 IP 会被直接拒绝（F001）**，
+因此网关应跑在家庭宽带等住宅网络环境（本机 Chrome 求解约 3 秒）。
+需要公网访问时用内网穿透把 3000 端口映射出去，以 [cpolar](https://www.cpolar.com) 为例：
+
+```bash
+cpolar http 3000        # 得到形如 https://xxxx.r6.cpolar.top 的公网地址
+```
+
+客户端 base_url 填该地址即可（也可用 frp / ngrok 等任意穿透工具）。
+若必须部署在云上，可配置 `ZCODE_UPSTREAM_PROXY` 指向住宅代理，验证码求解与上游请求将统一走代理。
 
 - 后台管理：`http://localhost:3000/admin`（默认密码 `zcode`）
 - 对话端点：`http://localhost:3000/v1/messages`（兼容 Anthropic Messages 协议）
@@ -139,6 +154,9 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 | `ZCODE_CAPTCHA_TIMEOUT` | 40 | 单次验证码求解超时（秒）|
 | `ZCODE_CAPTCHA_RETRIES` | 4 | 验证码求解失败重试次数 |
 | `ZCODE_APP_VERSION` | 3.7.7 | 伪装的上游客户端版本号（请求头与配置接口）|
+| `ZCODE_UPSTREAM_PROXY` | 空 | 住宅代理（http/socks5）。验证码求解与上游请求统一走它，云部署绕过 IP 风控 |
+| `ZCODE_CAPTCHA_STALE_GRACE` | 300000 | 验证码参数过期宽限期 (ms)，期间返回旧值并后台刷新 |
+| `ZCODE_CAPTCHA_FAIL_TTL` | 60000 | 求解失败熔断时长 (ms) |
 | `ZCODE_THINKING_BUDGET` | 8192 | GLM-5.3 强制思考：客户端未开启时自动注入的思考预算 tokens |
 | `ZCODE_REASONING_EFFORT` | max | GLM-5.3 思考深度（low / high / max）|
 | `ZCODE_OAUTH_REDIRECT_URI` | https://zcode.z.ai/login | OAuth 回跳地址。Z.AI 按 client_id 校验白名单，该公开 client_id 仅注册了 `/login`，请勿改动 |

@@ -11,3 +11,5 @@ data_test/
 
 .env
 js-code/
+data.zip
+data_backup*
