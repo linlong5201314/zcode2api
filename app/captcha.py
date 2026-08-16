@@ -23,6 +23,7 @@ import httpx
 from playwright.async_api import async_playwright
 
 from . import logs, settings
+from .proxy import upstream_proxy
 
 # 无头浏览器伪装成普通 Windows Chrome，避免被风控识别为自动化环境
 _CHROME_UA = (
@@ -98,7 +99,7 @@ class CaptchaManager:
         if self._config_cache and now - self._config_cache_at < settings.CAPTCHA_CONFIG_CACHE_TTL:
             return self._config_cache
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=15, proxy=upstream_proxy()) as client:
                 res = await client.get(
                     "https://zcode.z.ai/api/v1/client/configs"
                     f"?version={settings.ZCODE_APP_VERSION}&os=win32"
@@ -208,8 +209,9 @@ class CaptchaManager:
                     "--disable-blink-features=AutomationControlled",
                 ],
             }
-            if settings.UPSTREAM_PROXY:
-                launch_kwargs["proxy"] = {"server": settings.UPSTREAM_PROXY}
+            proxy_url = upstream_proxy()
+            if proxy_url:
+                launch_kwargs["proxy"] = {"server": proxy_url}
             browser = await pw.chromium.launch(**launch_kwargs)
             try:
                 page = await browser.new_page(

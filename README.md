@@ -78,9 +78,10 @@ docker run -d --name zcode2api -p 3000:3000 \
 | `/admin/login` | 后台登录（Bearer 密钥鉴权，凭证加密存于浏览器 localStorage）|
 | `/admin/accounts` | 账号池：新增/导入/导出、启用禁用、**实时额度与状态监控**（每 5 秒刷新）|
 | `/admin/settings` | 后台密码、网关 API Key |
+| `/admin/proxy` | 代理设置：一键导入本机代理、手动配置、订阅解析、出口 IP 测试 |
 
 账号池页实时展示每个账号的状态（正常 / 额度用完 / 限流 / 异常 / 禁用）、各模型剩余额度、
-调用与失败次数。请求按 round-robin 分发，**某账号额度用完会自动切换到下一个账号**，并在 UI 中即时反映。
+调用与失败次数。请求按顺序轮询分发，**某账号额度用完会自动切换到下一个账号**，并在 UI 中即时反映。
 
 ## 多账号轮询与换号
 
@@ -92,19 +93,37 @@ docker run -d --name zcode2api -p 3000:3000 \
 
 ## OAuth 授权登录（Z.AI）
 
-后台「账号池 → 新增 → 授权登录」或 CLI `python main.py login zai` 均可发起：
+后台「账号池 → 新增 → 授权登录」提供两种方式，CLI `python main.py login zai` 为手动方式：
 
-1. 网关生成 Z.AI 官方授权链接（`chat.z.ai/api/oauth/authorize`，与 zcode.z.ai 网页端同款协议）；
-2. 在浏览器打开并完成 Z.AI 账号登录，随后浏览器会跳回 `zcode.z.ai/login?code=...`（页面本身可能报错，可忽略）；
-3. 复制地址栏完整网址（或 `code` 参数值），粘贴回后台输入框 / CLI 提示符，网关即兑换
-   Coding Plan JWT 自动入池（并尝试兑换 API Key 作为回退凭证）。
+**一键登录（推荐，网关在本机运行时）**
 
-> Z.AI 服务端按 client_id 校验重定向 URI 白名单，只接受 zcode.z.ai 自家页面，
-> 因此无法由网关直接接收回调，需要用户手动中转一次 code。
+1. 点击「开始一键登录」，浏览器打开 Z.AI 官方授权页（`chat.z.ai/api/oauth/authorize`）；
+2. 登录并授权后浏览器自动跳回 `http://127.0.0.1:{端口}/oauth/callback`（Z.AI 已注册的回环回调地址），
+   网关自动捕获授权码并完成兑换，**全程无需复制粘贴**；
+3. 后台页面每 2 秒轮询进度，导入成功后自动关闭弹窗，账号以邮箱前缀命名并附带用户信息。
+
+**手动粘贴（网关不在本机 / 回调被拦截时）**
+
+1. 切到「手动粘贴」，打开授权链接完成登录，浏览器跳回 `zcode.z.ai/login?code=...`（页面可能报错，可忽略）；
+2. 复制地址栏完整网址（或 `code` 参数值）粘贴回后台输入框，网关兑换
+   编程套餐 JWT（并尝试兑换 API Key 作为回退凭证）自动入池。
 
 **备选：手动提取 JWT**。若上述流程不可用，可在浏览器登录 [zcode.z.ai](https://zcode.z.ai) 后，
 按 F12 打开控制台执行 `copy(localStorage.getItem('zcodejwttoken'))`（JWT 已进剪贴板），
 再通过「粘贴凭证」入池。
+
+## 代理设置（一键导入本机代理）
+
+后台新增「代理设置」页，代理生效范围为：上游对话、验证码求解浏览器、额度查询、OAuth 兑换。
+
+- **一键导入**：自动读取系统代理（Windows 注册表 / macOS scutil）并探测本机 Clash 等内核的
+  监听端口（7897 / 7890 等），点击即启用，保存后即时生效、无需重启；
+- **手动配置**：支持 `http://`、`https://`、`socks5://`，可带账号密码；
+- **订阅解析**：粘贴机场订阅链接可查看节点协议分布与使用建议。注意订阅中的
+  hysteria2 / vmess / trojan / ss 等节点无法被程序直连，须经本机 Clash 内核的
+  混合端口（如 `http://127.0.0.1:7897`）转接 —— 与 OmniRoute 的「本地内核端点」方案一致；
+- **出口 IP 测试**：一键验证代理是否生效，展示代理出口 IP 与直连 IP 对比；
+- 优先级：后台保存的代理 > 环境变量 `ZCODE_UPSTREAM_PROXY` > 直连。
 
 ## 鉴权
 
@@ -154,7 +173,7 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 | `ZCODE_CAPTCHA_TIMEOUT` | 40 | 单次验证码求解超时（秒）|
 | `ZCODE_CAPTCHA_RETRIES` | 4 | 验证码求解失败重试次数 |
 | `ZCODE_APP_VERSION` | 3.7.7 | 伪装的上游客户端版本号（请求头与配置接口）|
-| `ZCODE_UPSTREAM_PROXY` | 空 | 住宅代理（http/socks5）。验证码求解与上游请求统一走它，云部署绕过 IP 风控 |
+| `ZCODE_UPSTREAM_PROXY` | 空 | 上游代理（http/socks5）。后台「代理设置」页保存的代理优先生效；验证码求解与上游请求统一走它 |
 | `ZCODE_CAPTCHA_STALE_GRACE` | 300000 | 验证码参数过期宽限期 (ms)，期间返回旧值并后台刷新 |
 | `ZCODE_CAPTCHA_FAIL_TTL` | 60000 | 求解失败熔断时长 (ms) |
 | `ZCODE_THINKING_BUDGET` | 8192 | GLM-5.3 强制思考：客户端未开启时自动注入的思考预算 tokens |

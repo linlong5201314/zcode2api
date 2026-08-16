@@ -1,6 +1,8 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
-httpx>=0.27.0
+httpx[socks]>=0.27.0
 python-dotenv>=1.0.1
+# 订阅链接解析（Clash YAML）；缺失时自动退化为正则解析
+pyyaml>=6.0
 # 验证码求解：Playwright 无头 Chromium 运行阿里云无痕 SDK（见 app/captcha.py）。
 playwright==1.62.0

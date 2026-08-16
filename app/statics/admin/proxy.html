@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>zcode2api · 代理设置</title>
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
+  <style>
+    .proxy-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .proxy-tag{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid #e4e4e7;
+      border-radius:8px;font-size:12px;cursor:pointer;background:#fff;transition:all .15s}
+    .proxy-tag:hover{border-color:#18181b;background:#fafafa}
+    .proxy-tag .port{font-weight:600}
+    .kv{display:flex;gap:24px;flex-wrap:wrap;font-size:12.5px;color:#52525b;line-height:2}
+    .kv b{color:#18181b;font-weight:600}
+    .test-result{margin-top:10px;padding:12px 14px;border-radius:10px;background:#f4f4f5;
+      font-size:12.5px;line-height:1.9;display:none}
+    .test-result.ok{background:#f0fdf4;color:#14532d}
+    .test-result.err{background:#fef2f2;color:#7f1d1d}
+    .type-pill{display:inline-block;margin:2px 4px 2px 0;padding:3px 10px;border-radius:20px;
+      background:#f4f4f5;border:1px solid #e4e4e7;font-size:11.5px;color:#3f3f46}
+  </style>
+</head>
+<body>
+<div id="admin-header" data-active="/admin/proxy"></div>
+
+<main class="admin-main">
+  <div class="page-hd">
+    <div>
+      <div class="page-title">代理设置</div>
+      <div class="page-sub">上游请求与验证码求解统一走代理 · 云服务器部署时建议配置住宅代理绕过 IP 风控</div>
+    </div>
+  </div>
+
+  <!-- 当前状态 -->
+  <div class="settings-card">
+    <div class="section-title" style="margin-bottom:16px">当前状态</div>
+    <div class="kv" id="cur-status">加载中…</div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button onclick="testCurrent()" class="dialog-btn dialog-btn-primary" id="btn-test">测试连通性（出口 IP）</button>
+      <button onclick="disableProxy()" class="dialog-btn" id="btn-off" style="display:none">停用代理（恢复直连）</button>
+    </div>
+    <div class="test-result" id="test-result"></div>
+  </div>
+
+  <!-- 一键导入 -->
+  <div class="settings-card">
+    <div class="section-title" style="margin-bottom:6px">一键导入本机代理</div>
+    <div class="hint" style="margin-bottom:14px">
+      自动读取系统代理（Windows 设置 / 注册表）并探测本机 Clash 等内核的监听端口，点击即可启用。
+      机场订阅中的 hysteria2 / vmess / trojan 等节点无法被程序直连，须经本机 Clash 内核端口转接。
+    </div>
+    <div id="import-area" class="proxy-row">探测中…</div>
+    <button onclick="detect()" class="dialog-btn" style="margin-top:12px">重新探测</button>
+  </div>
+
+  <!-- 手动配置 -->
+  <div class="settings-card">
+    <div class="section-title" style="margin-bottom:6px">手动配置</div>
+    <div class="settings-row">
+      <label>代理地址</label>
+      <div class="hint">支持 http:// 、https:// 、socks5:// 三种格式，可带账号密码（如 http://user:pass@host:port）。保存后即刻生效，无需重启。</div>
+      <div class="proxy-row">
+        <input class="input" id="proxy-url" placeholder="例如 http://127.0.0.1:7897 或 socks5://127.0.0.1:7890" style="flex:1;min-width:280px">
+        <button onclick="saveProxy()" class="dialog-btn dialog-btn-primary">保存并启用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 订阅链接 -->
+  <div class="settings-card">
+    <div class="section-title" style="margin-bottom:6px">订阅链接解析</div>
+    <div class="hint" style="margin-bottom:14px">
+      粘贴机场 / Clash 订阅链接，解析节点协议分布并给出使用建议（仅解析，不会保存订阅）。
+    </div>
+    <div class="proxy-row" style="margin-bottom:12px">
+      <input class="input" id="sub-url" placeholder="https://example.com/api/v1/client/subscribe?token=..." style="flex:1;min-width:280px">
+      <button onclick="parseSub()" class="dialog-btn dialog-btn-primary" id="btn-sub">解析订阅</button>
+    </div>
+    <div class="test-result" id="sub-result"></div>
+  </div>
+
+  <!-- 使用说明 -->
+  <div class="settings-card">
+    <div class="section-title" style="margin-bottom:12px">使用说明</div>
+    <div class="hint" style="line-height:1.9">
+      · 代理生效范围：上游对话请求、验证码求解浏览器、额度查询、OAuth 登录兑换，全部统一走代理。<br>
+      · 本地部署（家庭宽带）通常无需代理；云服务器 IP 会被无痕验证风控拒绝，必须配住宅代理。<br>
+      · 使用 Clash Verge 时保持「系统代理」或内核开启，点上方一键导入即可（常见端口 7897 / 7890）。<br>
+      · 后台保存的代理优先于环境变量 <code>ZCODE_UPSTREAM_PROXY</code>；清空后台设置即回退环境变量。
+    </div>
+  </div>
+</main>
+
+<script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
+<script src="/static/js/header.js?v={{APP_VERSION}}"></script>
+<script>
+const SOURCE_LABEL={db:'后台设置',env:'环境变量',none:'未启用（直连）'};
+
+(async()=>{
+  await renderAdminHeader();
+  const key=await adminKey.get();
+  if(!key||!await verifyKey(ADMIN_API+'/verify',key).catch(()=>false))return location.href='/admin/login';
+  load();
+})();
+
+async function load(){
+  try{
+    const d=await api('GET','/proxy');
+    renderCurrent(d);
+    renderImport(d);
+  }catch(e){showToast('加载失败: '+e.message,'error');}
+}
+
+function renderCurrent(d){
+  const cur=d.current||{};
+  const sys=d.system||{};
+  let html='';
+  if(cur.url){
+    html+=`<span>状态：<b style="color:#16a34a">已启用</b></span><span>地址：<b>${esc(cur.masked||cur.url)}</b></span><span>来源：<b>${SOURCE_LABEL[cur.source]||cur.source}</b></span>`;
+    document.getElementById('btn-off').style.display='';
+  }else{
+    html+=`<span>状态：<b style="color:#a1a1aa">未启用（直连）</b></span><span>来源：<b>${SOURCE_LABEL[cur.source]||cur.source}</b></span>`;
+    document.getElementById('btn-off').style.display='none';
+  }
+  if(sys.enabled&&sys.url)html+=`<span>系统代理：<b>${esc(sys.url)}</b>（可直接导入）</span>`;
+  document.getElementById('cur-status').innerHTML=html;
+}
+
+function renderImport(d){
+  const sys=d.system||{};
+  const ports=d.ports||[];
+  let html='';
+  if(sys.enabled&&sys.url)
+    html+=`<button class="proxy-tag" onclick="applyProxy('${esc(sys.url)}')"><span class="port">系统代理</span> ${esc(sys.url)}</button>`;
+  if(ports.length)
+    html+=ports.map(p=>`<button class="proxy-tag" onclick="applyProxy('${esc(p.url)}')"><span class="port">${p.port}</span> ${esc(p.label)}</button>`).join('');
+  document.getElementById('import-area').innerHTML=html||'未探测到本机代理端口，请确认 Clash 等已启动，或改用手动配置';
+}
+
+async function detect(){
+  document.getElementById('import-area').textContent='探测中…';
+  load(); // GET /proxy 每次都会实时探测系统代理与本机端口
+}
+
+async function applyProxy(url){
+  try{
+    const d=await api('PUT','/proxy',{url});
+    showToast(d.message||'已启用','success');
+    load();
+  }catch(e){showToast('启用失败: '+e.message,'error');}
+}
+
+async function saveProxy(){
+  const url=document.getElementById('proxy-url').value.trim();
+  if(!url)return showToast('请输入代理地址','error');
+  await applyProxy(url);
+}
+
+async function disableProxy(){
+  try{
+    const d=await api('PUT','/proxy',{url:''});
+    showToast(d.message||'已停用','success');
+    load();
+  }catch(e){showToast('操作失败: '+e.message,'error');}
+}
+
+async function testCurrent(){
+  const btn=document.getElementById('btn-test');
+  const box=document.getElementById('test-result');
+  btn.disabled=true;btn.textContent='测试中…';
+  box.style.display='none';
+  try{
+    const d=await api('POST','/proxy/test',{});
+    box.className='test-result '+(d.ok?'ok':'err');
+    let html=`<b>${d.ok?'代理可用':'代理不可用'}</b><br>${esc(d.message||'')}`;
+    if(d.exit_ip)html+=`<br>代理出口 IP：<b>${esc(d.exit_ip)}</b>`;
+    if(d.direct_ip)html+=` · 直连 IP：<b>${esc(d.direct_ip)}</b>`;
+    if(d.elapsed!=null)html+=` · 耗时 ${d.elapsed}s`;
+    box.innerHTML=html;
+  }catch(e){
+    box.className='test-result err';box.textContent='测试失败: '+e.message;
+  }finally{
+    box.style.display='';
+    btn.disabled=false;btn.textContent='测试连通性（出口 IP）';
+  }
+}
+
+async function parseSub(){
+  const url=document.getElementById('sub-url').value.trim();
+  if(!url)return showToast('请输入订阅链接','error');
+  const btn=document.getElementById('btn-sub');
+  const box=document.getElementById('sub-result');
+  btn.disabled=true;btn.textContent='解析中…';box.style.display='none';
+  try{
+    const d=await api('POST','/proxy/subscription',{url});
+    if(!d.ok){
+      box.className='test-result err';
+      box.textContent=d.error||d.advice||'解析失败';
+    }else{
+      box.className='test-result ok';
+      const types=Object.entries(d.types||{}).map(([t,n])=>`<span class="type-pill">${esc(t)} × ${n}</span>`).join('');
+      let html=`共解析到 <b>${d.node_count}</b> 个节点：${types}<br>`;
+      if(d.needs_core)html+=`其中 <b>${d.needs_core}</b> 个为需本机内核转接的协议（${(d.needs_core_types||[]).join(' / ')}）<br>`;
+      if(d.direct_usable)html+=`<b>${d.direct_usable}</b> 个 http/socks5 节点可直接使用<br>`;
+      html+=`<br>💡 ${esc(d.advice||'')}`;
+      box.innerHTML=html;
+    }
+  }catch(e){
+    box.className='test-result err';box.textContent='解析失败: '+e.message;
+  }finally{
+    box.style.display='';
+    btn.disabled=false;btn.textContent='解析订阅';
+  }
+}
+
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+</script>
+</body>
+</html>

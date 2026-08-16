@@ -1,4 +1,4 @@
-"""后台管理 API：/admin/api/*（账号池、设置、用量监控）。"""
+"""后台管理 API：/admin/api/*（账号池、设置、用量监控、代理配置）。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,17 @@ from fastapi.responses import JSONResponse
 from .. import settings
 from ..auth_admin import verify_admin_key
 from ..models import PROVIDERS, Status
-from ..oauth import ZaiAuthFlow, extract_code
+from ..oauth import ZaiAuthFlow, display_name, extract_code
+from ..proxy import (
+    detect_system_proxy,
+    fetch_subscription,
+    mask_proxy,
+    probe_local_ports,
+    proxy_source,
+    set_upstream_proxy,
+    test_proxy,
+    upstream_proxy,
+)
 from ..quota import fetch_quota, refresh_accounts
 from ..store import store
 
@@ -167,23 +177,100 @@ async def refresh_one(account_id: str):
 
 
 # ── OAuth 登录（Z.AI）────────────────────────────────────────────────────────
+async def _import_oauth_account(data: dict) -> tuple[object, dict]:
+    """把兑换结果导入账号池：保存 JWT、尝试兑换 API Key 回退、记录用户信息。"""
+    zcode_jwt = data.get("token")
+    access_token = (data.get("zai") or {}).get("access_token")
+    user = data.get("user") or {}
+    name = display_name(user) or "OAuth账号"
+    account = None
+    if zcode_jwt:
+        account = store.add_account("zai", name, zcode_jwt)
+        account.user = user
+        store.update_account(account)
+    if access_token:
+        try:
+            api_key = await ZaiAuthFlow.manual().exchange_api_key(access_token)
+            if account is not None:
+                account.api_key = api_key
+                store.update_account(account)
+            else:
+                account = store.add_account("zai", name, api_key)
+                account.user = user
+                store.update_account(account)
+        except Exception:  # noqa: BLE001 - 兑换失败不影响 JWT 已入池
+            pass
+    return account, user
+
+
+def _login_result_json(account, user: dict, extra: dict | None = None) -> dict:
+    """构造登录结果 JSON（含用户信息，便于前端展示）。"""
+    payload = {
+        "status": "ready",
+        "account": account.public_view() if account else None,
+        "user": {
+            "name": display_name(user) or None,
+            "email": user.get("email"),
+            "user_id": user.get("user_id") or user.get("userId") or user.get("id"),
+        },
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 @router.post("/login/start")
-async def login_start():
-    """构造授权链接。redirect_uri 必须是 Z.AI 已注册页面，授权后由用户复制回跳地址中的 code。"""
+async def login_start(payload: dict = Body(default=None)):
+    """构造授权链接。mode=loopback（默认，一键登录）回跳到网关自身自动捕获；
+    mode=manual 回跳到 zcode.z.ai 登录页，由用户复制回跳地址中的 code。"""
+    payload = payload or {}
+    mode = payload.get("mode") or "loopback"
     now = time.time()
     for fid in [fid for fid, f in _login_flows.items() if now - f.created > _LOGIN_FLOW_TTL]:
         _login_flows.pop(fid, None)
 
-    flow = ZaiAuthFlow(settings.OAUTH_REDIRECT_URI)
+    if mode == "manual":
+        flow = ZaiAuthFlow.manual()
+    else:
+        flow = ZaiAuthFlow.loopback(settings.PORT)
     flow_id = secrets.token_hex(8)
     flow.created = now
     _login_flows[flow_id] = flow
-    return {"flow_id": flow_id, "authorize_url": flow.authorize_url()}
+    return {
+        "flow_id": flow_id,
+        "mode": mode,
+        "authorize_url": flow.authorize_url(),
+        "redirect_uri": flow.redirect_uri,
+    }
+
+
+@router.post("/login/poll")
+async def login_poll(payload: dict = Body(...)):
+    """轮询一键登录进度；回跳到达后自动兑换并导入账号池。"""
+    flow = _login_flows.get(payload.get("flow_id") or "")
+    if not flow:
+        raise HTTPException(404, "登录会话不存在或已过期，请重新发起登录")
+
+    result = await flow.poll()
+    status = result.get("status")
+    if status == "pending":
+        return {"status": "pending"}
+    if status == "ready":
+        _login_flows.pop(payload["flow_id"], None)
+        data = result.get("data") or {}
+        account, user = await _import_oauth_account(data)
+        if account is None:
+            return {"status": "failed", "message": "未能从授权结果中获取凭证"}
+        if account.mode == "jwt":
+            await refresh_accounts([account])
+        return _login_result_json(account, user)
+    # failed / unknown
+    return {"status": "failed", "message": result.get("message") or "登录会话状态异常，请重试"}
 
 
 @router.post("/login/finish")
 async def login_finish(payload: dict = Body(...)):
-    """用户粘贴回跳地址 / code，服务端兑换凭证并导入账号池。"""
+    """手动模式：用户粘贴回跳地址 / code，服务端兑换凭证并导入账号池。"""
     flow = _login_flows.get(payload.get("flow_id") or "")
     if not flow:
         raise HTTPException(404, "登录会话不存在或已过期，请重新发起登录")
@@ -197,29 +284,66 @@ async def login_finish(payload: dict = Body(...)):
         # 授权码一次性，失败后保留会话：重新打开授权链接取新 code 即可重试（TTL 兜底清理）
         return {"status": "failed", "message": f"token 兑换失败: {err}（可重新打开授权链接获取新 code 后重试）"}
 
-    # 授权成功：保存 Coding Plan JWT，并尝试兑换 API Key 作为同账号回退
-    zcode_jwt = data.get("token")
-    access_token = (data.get("zai") or {}).get("access_token")
-    account = None
-    if zcode_jwt:
-        account = store.add_account("zai", "oauth-login", zcode_jwt)
-    if access_token:
-        try:
-            api_key = await flow.exchange_api_key(access_token)
-            if account is not None:
-                account.api_key = api_key
-                store.update_account(account)
-            else:
-                account = store.add_account("zai", "oauth-login", api_key)
-        except Exception:  # noqa: BLE001 - 兑换失败不影响 JWT 已入池
-            pass
-
+    user = data.get("user") or {}
+    account, user = await _import_oauth_account(data)
     _login_flows.pop(payload["flow_id"], None)
     if account is None:
         return {"status": "failed", "message": "未能从授权结果中获取凭证"}
     if account.mode == "jwt":
         await refresh_accounts([account])
-    return {"status": "ready", "account": account.public_view()}
+    return _login_result_json(account, user)
+
+
+# ── 代理配置 ─────────────────────────────────────────────────────────────────
+@router.get("/proxy")
+async def get_proxy():
+    """当前代理状态 + 系统代理探测 + 本机端口探测。"""
+    return {
+        "current": {
+            "url": upstream_proxy(),
+            "masked": mask_proxy(upstream_proxy()) or None,
+            "source": proxy_source(),
+        },
+        "system": detect_system_proxy(),
+        "ports": await probe_local_ports(),
+    }
+
+
+@router.put("/proxy")
+async def put_proxy(payload: dict = Body(...)):
+    """保存 / 清空上游代理（空值清除后台设置，回退环境变量）。"""
+    url = (payload.get("url") or "").strip()
+    if url and not url.startswith(("http://", "https://", "socks5://", "socks4://")):
+        raise HTTPException(400, "代理地址须以 http:// 、https:// 或 socks5:// 开头")
+    effective = set_upstream_proxy(url)
+    return {
+        "ok": True,
+        "current": {
+            "url": effective,
+            "masked": mask_proxy(effective) or None,
+            "source": proxy_source(),
+        },
+        "message": "代理已启用，上游请求与验证码求解即刻走代理" if effective else "已停用代理，恢复直连",
+    }
+
+
+@router.post("/proxy/test")
+async def post_proxy_test(payload: dict = Body(default=None)):
+    """测试代理连通性与出口 IP（未传 url 则测试当前生效代理）。"""
+    payload = payload or {}
+    return await test_proxy((payload.get("url") or "").strip() or None)
+
+
+@router.post("/proxy/subscription")
+async def post_proxy_subscription(payload: dict = Body(...)):
+    """解析订阅链接：统计节点协议分布，判断是否需要本地 Clash 内核转接。"""
+    url = (payload.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "订阅链接须以 http:// 或 https:// 开头")
+    try:
+        return await fetch_subscription(url)
+    except Exception as err:  # noqa: BLE001
+        return {"ok": False, "error": f"订阅拉取失败: {str(err)[:200]}"}
 
 
 # ── 设置 ─────────────────────────────────────────────────────────────────────

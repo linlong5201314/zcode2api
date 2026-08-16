@@ -43,10 +43,11 @@
   <div class="settings-card">
     <div class="section-title" style="margin-bottom:12px">使用说明</div>
     <div class="hint" style="line-height:1.9">
-      · 在「账号池」粘贴 Coding Plan JWT 或 API Key 即可加入轮询。<br>
-      · 请求按 round-robin 分发；某账号额度用完会自动切到下一个账号。<br>
+      · 在「账号池」粘贴编程套餐令牌（JWT）或接口密钥即可加入轮询。<br>
+      · 请求按顺序轮询分发；某账号额度用完会自动切换到下一个账号。<br>
       · 账号额度、状态在「账号池」页实时刷新展示。<br>
-      · 对话端点：<code id="endpoint">/v1/messages</code>（兼容 Anthropic Messages 协议）。
+      · 出口代理在「代理设置」页配置，云端部署绕过 IP 风控。<br>
+      · 对话端点：<code id="endpoint">/v1/messages</code>（兼容 Anthropic 消息协议）。
     </div>
   </div>
 </main>

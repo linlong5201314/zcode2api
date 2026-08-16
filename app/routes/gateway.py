@@ -20,6 +20,7 @@ from ..agent import build_request
 from ..auth_admin import verify_gateway_key
 from ..captcha import captcha_manager
 from ..models import Account, Status
+from ..proxy import upstream_proxy
 from ..quota import fetch_quota
 from ..store import store
 
@@ -510,7 +511,7 @@ async def _forward_once(req_id, account, body, payload, incoming_headers, verify
 
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=30.0, read=None, write=120.0, pool=30.0),
-            proxy=settings.UPSTREAM_PROXY,
+            proxy=upstream_proxy(),
         )
         cm = client.stream("POST", url, headers=headers, content=payload)
         try:

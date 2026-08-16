@@ -44,6 +44,7 @@ class Account:
     quota: dict = field(default_factory=dict)
     plan: dict = field(default_factory=dict)        # 当前激活方案
     usage: dict = field(default_factory=dict)       # 近期用量原始数据
+    user: dict = field(default_factory=dict)        # OAuth 用户信息（邮箱 / 昵称等）
 
     use_count: int = 0
     fail_count: int = 0
@@ -103,6 +104,10 @@ class Account:
             "status": self.effective_status(),
             "quota": self.quota,
             "plan": self.plan,
+            "user": {
+                "name": (self.user or {}).get("name") or "",
+                "email": (self.user or {}).get("email") or "",
+            } if self.user else {},
             "use_count": self.use_count,
             "fail_count": self.fail_count,
             "last_used_at": self.last_used_at,
