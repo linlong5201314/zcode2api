@@ -1,0 +1,6 @@
+# Runtime dependencies
+-r requirements.txt
+
+# Fast, offline-friendly unit suite
+pytest>=8.0
+pytest-asyncio>=0.23

@@ -20,7 +20,11 @@ import time
 from pathlib import Path
 
 import httpx
-from playwright.async_api import async_playwright
+
+try:  # Browser support is optional for API-key-only deployments and unit tests.
+    from playwright.async_api import async_playwright
+except ImportError:  # pragma: no cover - dependency is present in the release image
+    async_playwright = None  # type: ignore[assignment]
 
 from . import logs, settings
 from .proxy import upstream_proxy
@@ -191,6 +195,10 @@ class CaptchaManager:
         raise RuntimeError(f"验证码求解失败: {last_err or '多次重试无结果'}")
 
     async def _run_browser(self, scene: str, region: str, prefix: str) -> str:
+        if async_playwright is None:
+            raise RuntimeError(
+                "验证码求解需要安装 Playwright；API Key 模式可不安装浏览器依赖"
+            )
         html = (
             _SOLVER_HTML
             .replace("__SCENE__", json.dumps(scene))

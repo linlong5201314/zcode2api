@@ -98,6 +98,12 @@ def callback_result(state: str) -> dict | None:
     return _callbacks.get((state or "").strip())
 
 
+def discard_callback(state: str) -> None:
+    """Drop a loopback callback registration during flow expiry/cancellation."""
+    if state:
+        _callbacks.pop(state.strip(), None)
+
+
 class ZaiAuthFlow:
     def __init__(self, redirect_uri: str, state: str | None = None) -> None:
         self.redirect_uri = redirect_uri

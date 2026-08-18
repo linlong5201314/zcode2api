@@ -169,7 +169,7 @@ class Store:
         with self._lock:
             for p in PROVIDERS:
                 for a in self._accounts[p]:
-                    if a.id == id_or_name:
+                    if a.id == id_or_name or a.name == id_or_name:
                         return a
         return None
 
@@ -180,17 +180,27 @@ class Store:
         return None
 
     # ── 账号增删改 ───────────────────────────────────────────────────────────
-    def add_account(self, provider: str, name: str, secret: str) -> Account:
+    def _add_account(self, provider: str, name: str, secret: str) -> tuple[Account, bool]:
         if provider not in PROVIDERS:
             raise ValueError(f"不支持的 provider: {provider}")
+        if not isinstance(secret, str) or not secret.strip():
+            raise ValueError("账号凭证不能为空")
         account = Account.create(provider, name, secret)
         with self._lock:
             for a in self._accounts[provider]:
                 if a.secret and a.secret == account.secret:
-                    return a  # 跳过重复 token
+                    return a, False  # 跳过重复 token
             self._accounts[provider].append(account)
             self._persist_account(account)
-        return account
+        return account, True
+
+    def add_account(self, provider: str, name: str, secret: str) -> Account:
+        """Add an account, returning the existing object for duplicate secrets."""
+        return self._add_account(provider, name, secret)[0]
+
+    def add_account_with_status(self, provider: str, name: str, secret: str) -> tuple[Account, bool]:
+        """Add an account and report whether a new row was created."""
+        return self._add_account(provider, name, secret)
 
     def remove_account(self, provider: str, id_or_name: str) -> bool:
         with self._lock:
@@ -253,17 +263,36 @@ class Store:
             }
 
     def import_accounts(self, payload: dict) -> int:
+        """Import valid account records and return the number actually added."""
+        if not isinstance(payload, dict):
+            return 0
         providers = payload.get("providers", {})
+        if not isinstance(providers, dict):
+            return 0
         count = 0
         for provider, items in providers.items():
             if provider not in PROVIDERS or not isinstance(items, list):
                 continue
             for it in items:
-                secret = it.get("secret") or it.get("token") or it.get("jwtToken") or it.get("apiKey")
-                if not secret:
+                if not isinstance(it, dict):
                     continue
-                self.add_account(provider, it.get("name", provider), secret)
-                count += 1
+                secret = (
+                    it.get("secret")
+                    or it.get("token")
+                    or it.get("jwtToken")
+                    or it.get("apiKey")
+                )
+                if not isinstance(secret, str) or not secret.strip():
+                    continue
+                try:
+                    _, created = self._add_account(
+                        provider,
+                        str(it.get("name") or provider),
+                        secret.strip(),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                count += int(created)
         return count
 
 

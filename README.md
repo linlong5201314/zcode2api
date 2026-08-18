@@ -32,6 +32,7 @@ cpolar http 3000        # 得到形如 https://xxxx.r6.cpolar.top 的公网地�
 - 后台管理：`http://localhost:3000/admin`（默认密码 `zcode`）
 - 对话端点：`http://localhost:3000/v1/messages`（兼容 Anthropic Messages 协议）
 - OpenAI 兼容端点：`http://localhost:3000/v1/chat/completions`（流式 / 非流式均支持）
+- 存活探针：`GET /healthz`；就绪探针：`GET /readyz`（可直接用于 Docker / K8s）
 
 ## Docker 部署
 
@@ -130,6 +131,8 @@ docker run -d --name zcode2api -p 3000:3000 \
 - **后台鉴权**：所有 `/admin/api/*` 需 `Authorization: Bearer <后台密码>`。
 - **网关鉴权（可选）**：在「设置」配置「网关 API Key」后，`/v1/messages` 须携带
   `Authorization: Bearer <key>` 或 `x-api-key: <key>`；留空则不校验。
+- 管理设置接口不会回传后台密钥或网关 Key，只返回“已设置”和掩码提示；设置页中留空表示保持原值。
+- 网关只向上游转发有限的客户端元数据 header，不会转发 Cookie、客户端 Authorization 或连接控制头。
 
 ## 无痕验证（无头 Chromium）
 
@@ -178,9 +181,13 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 | `ZCODE_CAPTCHA_FAIL_TTL` | 60000 | 求解失败熔断时长 (ms) |
 | `ZCODE_THINKING_BUDGET` | 8192 | GLM-5.3 强制思考：客户端未开启时自动注入的思考预算 tokens |
 | `ZCODE_REASONING_EFFORT` | max | GLM-5.3 思考深度（low / high / max）|
+| `ZCODE_MODELS` | 内置模型清单 | `/v1/models` 对外公布的模型，逗号分隔，可按套餐覆盖 |
+| `ZCODE_MAX_REQUEST_BYTES` | 8388608 | 单次网关 JSON 请求体上限（字节） |
 | `ZCODE_OAUTH_REDIRECT_URI` | https://zcode.z.ai/login | OAuth 回跳地址。Z.AI 按 client_id 校验白名单，该公开 client_id 仅注册了 `/login`，请勿改动 |
 | `CAPTCHA_CACHE_TTL` | 45000 | 验证码缓存时长 (ms) |
 | `ZAI_UPSTREAM_URL` / `ZAI_FALLBACK_URL` / `BIGMODEL_UPSTREAM_URL` | — | 上游端点 |
+
+时间、重试次数、端口和请求体上限等数值配置会在启动时限制到安全范围；超出范围时使用边界值。
 
 ## 项目结构
 
@@ -218,6 +225,16 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 ## 文档
 
 - [架构概览 docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 系统架构图、请求流程、账号状态机、无痕验证流程与已知限制。
+
+## 开发与测试
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+测试覆盖协议归一化、OpenAI 工具调用转换、凭证 header 隔离、SQLite 导入去重、
+管理密钥脱敏和健康探针；不需要真实 ZCode 账号或浏览器即可运行。
 
 ## 致谢
 

@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from .. import settings
 from ..auth_admin import verify_admin_key
 from ..models import PROVIDERS, Status
-from ..oauth import ZaiAuthFlow, display_name, extract_code
+from ..oauth import ZaiAuthFlow, discard_callback, display_name, extract_code
 from ..proxy import (
     detect_system_proxy,
     fetch_subscription,
@@ -101,8 +101,12 @@ async def add_accounts(payload: dict = Body(...)):
     added = []
     for tok in dict.fromkeys(tokens):  # 去重保序
         name = payload.get("name") or f"{provider}-{len(store.list_accounts(provider)) + 1}"
-        acc = store.add_account(provider, name, tok)
-        added.append(acc.id)
+        try:
+            acc, created = store.add_account_with_status(provider, name, tok)
+        except ValueError as err:
+            raise HTTPException(400, str(err)) from err
+        if created:
+            added.append(acc.id)
     # 立即刷新一次额度（仅 zai jwt）
     fresh = [a for a in store.list_accounts(provider) if a.id in added and a.mode == "jwt"]
     if fresh:
@@ -227,7 +231,9 @@ async def login_start(payload: dict = Body(default=None)):
     mode = payload.get("mode") or "loopback"
     now = time.time()
     for fid in [fid for fid, f in _login_flows.items() if now - f.created > _LOGIN_FLOW_TTL]:
-        _login_flows.pop(fid, None)
+        flow = _login_flows.pop(fid, None)
+        if flow is not None:
+            discard_callback(flow.state)
 
     if mode == "manual":
         flow = ZaiAuthFlow.manual()
@@ -349,9 +355,23 @@ async def post_proxy_subscription(payload: dict = Body(...)):
 # ── 设置 ─────────────────────────────────────────────────────────────────────
 @router.get("/settings")
 async def get_settings():
+    admin_key = store.admin_key()
+    gateway_key = store.gateway_key()
+
+    def _hint(value: str) -> str | None:
+        if not value:
+            return None
+        return f"{value[:2]}…{value[-2:]}" if len(value) > 4 else "••••"
+
     return {
-        "admin_key": store.admin_key(),
-        "gateway_key": store.gateway_key(),
+        # Never send credential material back to the browser.  The previous
+        # endpoint returned both keys in plaintext on every settings refresh.
+        "admin_key": None,
+        "gateway_key": None,
+        "admin_key_set": bool(admin_key),
+        "gateway_key_set": bool(gateway_key),
+        "admin_key_hint": _hint(admin_key),
+        "gateway_key_hint": _hint(gateway_key),
         "quota_refresh_interval": store.quota_refresh_interval(),
     }
 

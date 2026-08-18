@@ -12,11 +12,11 @@
 
 | 目标 | 实现手段 |
 |------|----------|
-| 协议兼容 | 完整复刻 Anthropic `/v1/messages` 请求/响应(含 SSE 流式) |
+| 协议兼容 | Anthropic `/v1/messages` 与 OpenAI `/v1/chat/completions`（含 SSE、图片与工具调用桥接） |
 | 高可用 | 多账号 round-robin;单账号失败/额度耗尽自动切换下一个 |
 | 可观测 | 后台周期刷新各账号额度,UI 实时展示状态与剩余额度 |
 | 无痕验证 | 用 Playwright + 真实 Chrome 跑阿里云无痕 SDK（jsdom 与 Playwright 自带 Chromium 均被风控识破） |
-| 凭证安全 | 账号/密钥仅落本地 SQLite;前端鉴权,token 脱敏展示 |
+| 凭证安全 | 账号/密钥仅落本地 SQLite;前端鉴权,token 脱敏展示；上游 header 白名单隔离 |
 | 轻量部署 | 单进程 FastAPI;按需启动无头 Chrome 求解;无外部数据库依赖 |
 
 ---
@@ -32,7 +32,7 @@ graph TD
 
     subgraph App["zcode2api（FastAPI 单进程）"]
         direction TB
-        GW["Gateway 网关<br/>/v1/messages · /v1/models"]
+        GW["Gateway 网关<br/>/v1/messages · /v1/models · /healthz"]
         ADMIN["Admin API<br/>/admin/api/*"]
         PAGES["Pages 页面路由<br/>/admin/*"]
         AUTH["Auth 鉴权<br/>网关 Key · 后台 Key"]
@@ -261,7 +261,17 @@ meta(      key PK, value )      # admin_key / gateway_key / quota_refresh_interv
 | 后台 `/admin/api/*` | `verify_admin_key` | 必须 `Authorization: Bearer <后台密钥>`(或 `?app_key=` 供 EventSource);`hmac.compare_digest` 定时安全比较 |
 | 网关 `/v1/messages`·`/v1/models` | `verify_gateway_key` | 配置了网关 Key 才校验(`Bearer` 或 `x-api-key`);留空放行 |
 
-密钥存于 `meta` 表,可在「设置」页或 `.env` 初始化。前端凭证加密存于浏览器 localStorage。
+密钥存于 `meta` 表,可在「设置」页或 `.env` 初始化。设置接口只返回是否已设置与短掩码，
+不会把完整密钥回传给浏览器；前端凭证仍按现有兼容方式保存在浏览器 localStorage。
+
+## 运行状况与请求边界
+
+- `GET /healthz` 是不带鉴权的存活探针，只返回服务名与版本。
+- `GET /readyz` 检查 SQLite 文件与后台密钥是否可用；失败返回 HTTP 503，并仅暴露布尔检查结果。
+- 每个请求会得到一个受限格式的 `X-Request-ID`，响应带安全基础 header。
+- 网关限制 JSON 请求体大小（默认 8 MiB，可由 `ZCODE_MAX_REQUEST_BYTES` 调整），并在进入账号轮询前校验模型、消息、内容块和 token 参数。
+- 端口、超时、重试、冷却和缓存 TTL 等数值环境变量在加载时做上下界钳制，避免错误配置造成无限等待或资源放大。
+- 转发到上游的客户端 header 使用白名单，认证、Cookie、连接控制及 `X-ZCode-*` 头由网关托管。
 
 ---
 
@@ -269,7 +279,8 @@ meta(      key PK, value )      # admin_key / gateway_key / quota_refresh_interv
 
 所有可调参数集中在 `app/settings.py`,均可由环境变量覆盖(见 `README.md` 的环境变量表)。
 要点:`ZCODE_PORT`、`ZCODE_DATA_DIR`、`ZCODE_QUOTA_REFRESH_INTERVAL`、`ZCODE_COOLING_SECONDS`、
-`ZCODE_APP_VERSION`、`ZCODE_CAPTCHA_TIMEOUT`、`ZCODE_CAPTCHA_RETRIES`、`CAPTCHA_CACHE_TTL`。
+`ZCODE_APP_VERSION`、`ZCODE_CAPTCHA_TIMEOUT`、`ZCODE_CAPTCHA_RETRIES`、`CAPTCHA_CACHE_TTL`、
+`ZCODE_MODELS` 与 `ZCODE_MAX_REQUEST_BYTES`。
 
 ---
 

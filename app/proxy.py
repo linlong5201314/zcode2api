@@ -15,6 +15,7 @@ import base64
 import re
 import subprocess
 import sys
+from urllib.parse import urlparse
 
 import httpx
 
@@ -213,7 +214,8 @@ async def test_proxy(proxy_url: str | None = None) -> dict:
         async with httpx.AsyncClient(proxy=proxy_url, timeout=15, trust_env=False) as via:
             ip = await _fetch_exit_ip(via)
     except (httpx.HTTPError, OSError) as err:
-        result["message"] = f"代理不可用: {err}"
+        detail = str(err).replace(proxy_url, mask_proxy(proxy_url))
+        result["message"] = f"代理不可用: {detail[:200]}"
         return result
     result["elapsed"] = round(_time.monotonic() - t0, 2)
     if not ip:
@@ -333,10 +335,30 @@ def parse_subscription_body(body: str) -> dict:
 
 async def fetch_subscription(url: str) -> dict:
     """拉取并解析订阅链接（以 Clash 客户端 UA 请求，返回 Clash YAML）。"""
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("订阅链接必须是带主机名的 http(s) 地址")
+    async with httpx.AsyncClient(
+        timeout=20,
+        follow_redirects=True,
+        proxy=upstream_proxy(),
+        trust_env=False,
+    ) as client:
         res = await client.get(
             url,
             headers={"User-Agent": "clash-verge/v2.2.0"},  # 头部须 ASCII，带 Clash UA 才返回 YAML
         )
         res.raise_for_status()
-        return parse_subscription_body(res.text)
+        max_bytes = 5 * 1024 * 1024
+        declared = res.headers.get("content-length")
+        if declared:
+            try:
+                declared_size = int(declared)
+            except (TypeError, ValueError):
+                declared_size = 0
+            if declared_size > max_bytes:
+                raise ValueError("订阅响应过大（上限 5 MiB）")
+        raw = await res.aread()
+        if len(raw) > max_bytes:
+            raise ValueError("订阅响应过大（上限 5 MiB）")
+        return parse_subscription_body(raw.decode("utf-8", "replace"))

@@ -134,11 +134,16 @@ function renderImport(d){
   const ports=d.ports||[];
   let html='';
   if(sys.enabled&&sys.url)
-    html+=`<button class="proxy-tag" onclick="applyProxy('${esc(sys.url)}')"><span class="port">系统代理</span> ${esc(sys.url)}</button>`;
+    html+=`<button class="proxy-tag" data-proxy-url="${esc(sys.url)}"><span class="port">系统代理</span> ${esc(sys.url)}</button>`;
   if(ports.length)
-    html+=ports.map(p=>`<button class="proxy-tag" onclick="applyProxy('${esc(p.url)}')"><span class="port">${p.port}</span> ${esc(p.label)}</button>`).join('');
+    html+=ports.map(p=>`<button class="proxy-tag" data-proxy-url="${esc(p.url)}"><span class="port">${p.port}</span> ${esc(p.label)}</button>`).join('');
   document.getElementById('import-area').innerHTML=html||'未探测到本机代理端口，请确认 Clash 等已启动，或改用手动配置';
 }
+
+document.getElementById('import-area').addEventListener('click',e=>{
+  const button=e.target.closest('[data-proxy-url]');
+  if(button)applyProxy(button.dataset.proxyUrl||'');
+});
 
 async function detect(){
   document.getElementById('import-area').textContent='探测中…';

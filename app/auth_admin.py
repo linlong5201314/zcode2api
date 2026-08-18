@@ -9,13 +9,21 @@ from fastapi import Header, HTTPException, Query, status
 from .store import store
 
 
+def _safe_token(token: str | None) -> str | None:
+    if not isinstance(token, str) or not token or len(token) > 4096:
+        return None
+    if any(ord(char) < 32 for char in token):
+        return None
+    return token
+
+
 def _extract_bearer(authorization: str | None) -> str | None:
     if not authorization:
         return None
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
+    parts = authorization.strip().split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
         return None
-    return token
+    return _safe_token(parts[1])
 
 
 async def verify_admin_key(
@@ -31,7 +39,7 @@ async def verify_admin_key(
     if not key:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未配置后台密钥")
 
-    token = _extract_bearer(authorization) or app_key
+    token = _safe_token(_extract_bearer(authorization) or app_key)
     if token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少鉴权凭证")
     if not hmac.compare_digest(token, key):
@@ -46,7 +54,7 @@ async def verify_gateway_key(
     key = store.gateway_key()
     if not key:
         return
-    token = _extract_bearer(authorization) or x_api_key
+    token = _safe_token(_extract_bearer(authorization) or x_api_key)
     if token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少 API Key")
     if not hmac.compare_digest(token, key):

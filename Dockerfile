@@ -36,4 +36,8 @@ COPY . .
 RUN mkdir -p /data
 EXPOSE 3000
 
+# 让编排平台能区分“容器已启动”和“网关已就绪”。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/healthz', timeout=3)"
+
 CMD ["python", "main.py", "serve"]

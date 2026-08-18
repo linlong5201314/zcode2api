@@ -27,6 +27,22 @@ def _account_id(name: str) -> str:
     return f"{safe}-{secrets.token_hex(4)}"
 
 
+def looks_like_jwt(secret: str, provider: str = "zai") -> bool:
+    """Recognise JWT-shaped credentials without decoding or trusting claims.
+
+    ZCode tokens are JWTs, but decoding them here would encourage treating
+    client-supplied claims as authoritative.  We only use the shape to choose
+    the transport mode; the upstream remains responsible for authentication.
+    """
+    if provider != "zai" or not isinstance(secret, str):
+        return False
+    parts = secret.strip().split(".")
+    if len(parts) != 3 or any(not part for part in parts):
+        return False
+    alphabet = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+    return all(set(part) <= alphabet for part in parts)
+
+
 @dataclass
 class Account:
     """单个可轮询的账号凭证 + 运行时状态。"""
@@ -57,10 +73,11 @@ class Account:
     @staticmethod
     def create(provider: str, name: str, secret: str) -> "Account":
         secret = (secret or "").strip()
-        is_jwt = secret.count(".") == 2 and provider == "zai"
+        is_jwt = looks_like_jwt(secret, provider)
+        clean_name = " ".join(str(name or "").split())[:120]
         return Account(
-            id=_account_id(name),
-            name=name or f"{provider}-account",
+            id=_account_id(clean_name),
+            name=clean_name or f"{provider}-account",
             provider=provider,
             mode="jwt" if is_jwt else "apiKey",
             jwt_token=secret if is_jwt else None,
@@ -87,6 +104,8 @@ class Account:
 
     @staticmethod
     def from_dict(data: dict) -> "Account":
+        if not isinstance(data, dict):
+            raise TypeError("account data must be an object")
         known = {f for f in Account.__dataclass_fields__}  # type: ignore[attr-defined]
         return Account(**{k: v for k, v in data.items() if k in known})
 

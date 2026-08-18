@@ -27,6 +27,13 @@ from app.oauth import ZaiAuthFlow, extract_code
 from app.quota import fetch_quota
 from app.store import store
 
+# Keep CLI diagnostics readable on Windows consoles using a legacy code page.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+
 C = {
     "reset": "\033[0m", "green": "\033[32m", "yellow": "\033[33m",
     "blue": "\033[34m", "red": "\033[31m", "cyan": "\033[36m", "bold": "\033[1m",

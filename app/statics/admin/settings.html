@@ -23,12 +23,14 @@
     <div class="settings-row">
       <label>后台密码</label>
       <div class="hint">用于登录此管理后台。修改后需用新密码重新登录。</div>
-      <input class="input" id="admin-key" type="text" placeholder="后台密码">
+      <input class="input" id="admin-key" type="password" placeholder="留空保持当前密码不变">
+      <div class="hint" id="admin-key-state" style="margin-top:6px"></div>
     </div>
     <div class="settings-row">
       <label>网关 API Key（可选）</label>
-      <div class="hint">设置后，调用 <code>/v1/messages</code> 须携带 <code>Authorization: Bearer &lt;key&gt;</code> 或 <code>x-api-key</code>。留空则不校验。</div>
-      <input class="input" id="gateway-key" type="text" placeholder="留空表示不启用">
+      <div class="hint">设置后，调用 <code>/v1/messages</code> 须携带 <code>Authorization: Bearer &lt;key&gt;</code> 或 <code>x-api-key</code>。为避免误操作，留空表示保持当前值。</div>
+      <input class="input" id="gateway-key" type="password" placeholder="留空保持当前 Key 不变">
+      <div class="hint" id="gateway-key-state" style="margin-top:6px"></div>
     </div>
     <div class="settings-row">
       <label>额度刷新间隔（秒）</label>
@@ -67,8 +69,10 @@
 async function load(){
   try{
     const d=await api('GET','/settings');
-    document.getElementById('admin-key').value=d.admin_key||'';
-    document.getElementById('gateway-key').value=d.gateway_key||'';
+    document.getElementById('admin-key').value='';
+    document.getElementById('gateway-key').value='';
+    document.getElementById('admin-key-state').textContent=d.admin_key_set?`当前已设置（${d.admin_key_hint||'已隐藏'}）`:'当前未设置';
+    document.getElementById('gateway-key-state').textContent=d.gateway_key_set?`当前已设置（${d.gateway_key_hint||'已隐藏'}）`:'当前未设置（免鉴权）';
     document.getElementById('quota-interval').value=d.quota_refresh_interval??60;
   }catch(e){showToast('加载失败: '+e.message,'error');}
 }
@@ -77,11 +81,14 @@ async function saveSettings(){
   const admin_key=document.getElementById('admin-key').value.trim();
   const gateway_key=document.getElementById('gateway-key').value.trim();
   const quota_refresh_interval=parseInt(document.getElementById('quota-interval').value,10);
-  if(!admin_key)return showToast('后台密码不能为空','error');
   if(isNaN(quota_refresh_interval)||quota_refresh_interval<0)return showToast('刷新间隔必须是非负整数','error');
+  const payload={quota_refresh_interval};
+  if(admin_key)payload.admin_key=admin_key;
+  if(gateway_key)payload.gateway_key=gateway_key;
   try{
-    await api('PUT','/settings',{admin_key,gateway_key,quota_refresh_interval});
-    await adminKey.set(admin_key);   // 同步本地保存，避免改密后被登出
+    await api('PUT','/settings',payload);
+    if(admin_key)await adminKey.set(admin_key);   // 同步本地保存，避免改密后被登出
+    await load();
     showToast('已保存','success');
   }catch(e){showToast('保存失败: '+e.message,'error');}
 }
