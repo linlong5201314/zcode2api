@@ -4,9 +4,12 @@ FROM python:3.13-slim
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     ZCODE_HOST=0.0.0.0 \
-    ZCODE_PORT=3000 \
     ZCODE_DATA_DIR=/data \
     ZCODE_CAPTCHA_BROWSER_CHANNEL=chrome
+
+# 注意：不要在此固定 ZCODE_PORT。Railway / Zeabur / Render 等平台会注入
+# $PORT，应用必须监听该端口才能通过平台健康检查；本地未注入时 settings.py
+# 自动回落到 3000（ZCODE_PORT → PORT → 3000）。
 
 WORKDIR /app
 

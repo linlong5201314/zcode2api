@@ -184,11 +184,18 @@ Responses 兼容层会把 `input` / `instructions` / `max_output_tokens` / funct
 ## Railway / Zeabur / Ubuntu 部署
 
 - Railway：仓库根目录已有 `railway.toml`，使用 Dockerfile 构建，`/healthz` 做健康检查；
-  平台注入的 `PORT` 会自动被读取，无需硬编码 3000。
+  平台注入的 `PORT` 会自动被读取（`ZCODE_PORT → PORT → 3000`），无需也不要硬编码端口。
 - Zeabur：仓库根目录已有 `zbpack.json`，强制使用根目录 `Dockerfile`；Zeabur Git Service
   同样读取 `$PORT`，不要在代码里写死端口。
 - Ubuntu：`docker compose up -d --build`，数据在 `./data`；升级前备份
   `data/accounts.db`，升级后 `docker compose logs -f zcode2api` 看启动与健康检查。
+
+> **云上部署必读（验证码风控）**：无痕验证按出口 IP 环境判定，Railway / Zeabur 等
+> 云服务器的数据中心 IP 几乎必然被风控拒绝（`verifyCode=F001`），导致所有 JWT 账号
+> 对话请求 503。**必须配置住宅代理**：设置环境变量 `ZCODE_UPSTREAM_PROXY`
+> （http/socks5），或部署后在后台「代理设置」页保存——验证码求解与上游请求会统一
+> 走该代理。本地家庭宽带部署通常无需代理。
+
 - 网关只向上游转发有限的客户端元数据 header，不会转发 Cookie、客户端 Authorization 或连接控制头。
 
 ## 无痕验证（无头 Chromium）

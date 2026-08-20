@@ -86,6 +86,26 @@ window.initAliyunCaptcha({
 </script></body></html>"""
 
 
+def _format_risk_reject(msg: dict) -> str:
+    """格式化风控拒绝原因，针对常见 verifyCode 给出可操作的排查建议。"""
+    reason = msg.get("reason")
+    verify_code = reason.get("verifyCode") if isinstance(reason, dict) else None
+    hints = {
+        # F001：环境风险——数据中心 IP / 自动化环境被识别（云上部署最常见）
+        "F001": "当前出口 IP/运行环境被风控识别（云服务器数据中心 IP 几乎必现）。"
+                "请配置住宅代理：环境变量 ZCODE_UPSTREAM_PROXY 或后台「代理设置」页，"
+                "求解与上游请求会统一走该代理",
+        # T001/T002：参数过期或重复使用
+        "T001": "验证参数已过期，网关会自动刷新重试",
+        "T002": "验证参数已被使用，网关会自动刷新重试",
+    }
+    hint = hints.get(str(verify_code or ""))
+    text = json.dumps(msg, ensure_ascii=False)[:300]
+    if hint:
+        return f"风控拒绝({verify_code}): {hint}。原始信息: {text}"
+    return f"风控拒绝: {text}"
+
+
 class CaptchaManager:
     def __init__(self) -> None:
         self._cached: str | None = None
@@ -236,9 +256,7 @@ class CaptchaManager:
                         msg = json.loads(received[0])
                         if msg.get("event") == "success" and msg.get("param"):
                             return msg["param"]
-                        raise RuntimeError(
-                            f"风控拒绝: {json.dumps(msg, ensure_ascii=False)[:300]}"
-                        )
+                        raise RuntimeError(_format_risk_reject(msg))
                     await asyncio.sleep(0.2)
                 raise TimeoutError("求解超时（无头浏览器未在时限内返回结果）")
             finally:
