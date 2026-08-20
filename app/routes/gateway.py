@@ -947,19 +947,152 @@ async def _openai_sse(body_iter, model: str, include_usage: bool = False):
 
 
 async def _responses_sse(body_iter, model: str, response_id: str):
-    """把 Anthropic SSE 流转换为 OpenAI Responses API SSE 流。"""
+    """把 Anthropic SSE 流转换为 OpenAI Responses API SSE 流。
+
+    除文本增量外，还把上游 tool_use 块合成为标准 function_call 输出项
+    （output_item.added / function_call_arguments.delta / done / output_item.done），
+    Codex 等依赖工具调用的客户端在流式模式下同样能收到完整事件序列。
+    sequence_number 全局单调递增，符合 Responses API 规范。
+    """
     created_at = int(time.time())
-    item_id = f"msg_{secrets.token_hex(8)}"
-    content_index = 0
-    output_index = 0
-    text_parts: list[str] = []
-    thinking_parts: list[str] = []
     usage: dict = {}
-    started = False
+    collected_tool_calls: list[dict] = []
+    sequence = 0
+    next_output_index = 0
+    # 每个 Anthropic content_block 的状态：text / thinking / tool
+    blocks: dict[int, dict] = {}
 
     def _event(name: str, payload: dict) -> bytes:
-        payload.setdefault("sequence_number", len(text_parts) + len(thinking_parts))
+        nonlocal sequence
+        payload.setdefault("sequence_number", sequence)
+        sequence += 1
         return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+
+    def _message_item_id() -> str:
+        return f"msg_{secrets.token_hex(8)}"
+
+    def _open_message_events(block_index: int) -> list[bytes]:
+        block = blocks[block_index]
+        block["item_id"] = _message_item_id()
+        return [
+            _event("response.output_item.added", {
+                "type": "response.output_item.added",
+                "output_index": block["output_index"],
+                "item": {
+                    "id": block["item_id"],
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": [],
+                },
+            }),
+            _event("response.content_part.added", {
+                "type": "response.content_part.added",
+                "item_id": block["item_id"],
+                "output_index": block["output_index"],
+                "content_index": 0,
+                "part": {"type": "output_text", "text": "", "annotations": []},
+            }),
+        ]
+
+    def _close_message_events(block_index: int) -> list[bytes]:
+        block = blocks.pop(block_index, None)
+        if not block or not block.get("item_id"):
+            return []
+        text = "".join(block.get("text", []))
+        full_text_parts.extend(block.get("text", []))
+        part = {"type": "output_text", "text": text, "annotations": []}
+        item = {
+            "id": block["item_id"],
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [part],
+        }
+        return [
+            _event("response.output_text.done", {
+                "type": "response.output_text.done",
+                "item_id": block["item_id"],
+                "output_index": block["output_index"],
+                "content_index": 0,
+                "text": text,
+            }),
+            _event("response.content_part.done", {
+                "type": "response.content_part.done",
+                "item_id": block["item_id"],
+                "output_index": block["output_index"],
+                "content_index": 0,
+                "part": part,
+            }),
+            _event("response.output_item.done", {
+                "type": "response.output_item.done",
+                "output_index": block["output_index"],
+                "item": item,
+            }),
+        ]
+
+    def _open_tool_events(block_index: int, block_payload: dict) -> list[bytes]:
+        nonlocal next_output_index
+        call_id = str(block_payload.get("id") or f"call_{secrets.token_hex(8)}")
+        block = blocks[block_index]
+        block.update({
+            "item_id": f"fc_{secrets.token_hex(8)}",
+            "call_id": call_id,
+            "name": str(block_payload.get("name") or "tool"),
+            "json": "",
+            "output_index": next_output_index,
+        })
+        next_output_index += 1
+        return [_event("response.output_item.added", {
+            "type": "response.output_item.added",
+            "output_index": block["output_index"],
+            "item": {
+                "id": block["item_id"],
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": call_id,
+                "name": block["name"],
+                "arguments": "",
+            },
+        })]
+
+    def _close_tool_events(block_index: int) -> list[bytes]:
+        block = blocks.pop(block_index, None)
+        if not block or block.get("kind") != "tool":
+            return []
+        arguments = block.get("json") or "{}"
+        try:
+            parsed = json.loads(arguments)
+            if not isinstance(parsed, dict):
+                parsed = {"value": parsed}
+        except (TypeError, ValueError):
+            parsed = {}
+        collected_tool_calls.append({
+            "id": block["call_id"],
+            "name": block["name"],
+            "input": parsed,
+        })
+        item = {
+            "id": block["item_id"],
+            "type": "function_call",
+            "status": "completed",
+            "call_id": block["call_id"],
+            "name": block["name"],
+            "arguments": arguments,
+        }
+        return [
+            _event("response.function_call_arguments.done", {
+                "type": "response.function_call_arguments.done",
+                "item_id": block["item_id"],
+                "output_index": block["output_index"],
+                "arguments": arguments,
+            }),
+            _event("response.output_item.done", {
+                "type": "response.output_item.done",
+                "output_index": block["output_index"],
+                "item": item,
+            }),
+        ]
 
     yield _event("response.created", {
         "type": "response.created",
@@ -973,6 +1106,9 @@ async def _responses_sse(body_iter, model: str, response_id: str):
         },
     })
 
+    full_text_parts: list[str] = []
+    thinking_parts: list[str] = []
+
     async for event, data in _iter_anthropic_events(body_iter):
         if event == "message_start":
             usage["input_tokens"] = ((data.get("message") or {}).get("usage") or {}).get("input_tokens", 0)
@@ -981,93 +1117,103 @@ async def _responses_sse(body_iter, model: str, response_id: str):
             usage["output_tokens"] = (data.get("usage") or {}).get("output_tokens", 0)
             usage["stop_reason"] = (data.get("delta") or {}).get("stop_reason")
             continue
+
+        block_index = data.get("index")
+        if not isinstance(block_index, int):
+            block_index = 0
+
+        if event == "content_block_start":
+            content_block = data.get("content_block") or {}
+            kind = str(content_block.get("type") or "")
+            if kind == "tool_use":
+                for events in [_close_message_events(i) for i, b in list(blocks.items()) if b.get("item_id")]:
+                    for chunk in events:
+                        yield chunk
+                blocks[block_index] = {"kind": "tool"}
+                for chunk in _open_tool_events(block_index, content_block):
+                    yield chunk
+            elif kind == "text":
+                blocks[block_index] = {"kind": "text", "text": [], "item_id": None}
+            else:  # thinking 等其它块：不需要输出项
+                blocks[block_index] = {"kind": kind}
+            continue
+
+        if event == "content_block_stop":
+            block = blocks.get(block_index)
+            if block and block.get("kind") == "tool":
+                for chunk in _close_tool_events(block_index):
+                    yield chunk
+            elif block and block.get("kind") == "text":
+                for chunk in _close_message_events(block_index):
+                    yield chunk
+            continue
+
         if event != "content_block_delta":
             continue
         delta = data.get("delta") or {}
+        block = blocks.get(block_index) or {}
         if delta.get("type") == "thinking_delta":
             thinking = delta.get("thinking") or ""
             if thinking:
                 thinking_parts.append(thinking)
             continue
+        if delta.get("type") == "input_json_delta" and block.get("kind") == "tool":
+            partial = delta.get("partial_json") or ""
+            block["json"] = block.get("json", "") + partial
+            yield _event("response.function_call_arguments.delta", {
+                "type": "response.function_call_arguments.delta",
+                "item_id": block.get("item_id"),
+                "output_index": block.get("output_index", 0),
+                "delta": partial,
+            })
+            continue
         if delta.get("type") != "text_delta":
             continue
+        if block.get("kind") is None:
+            # 上游流缺 content_block_start（异常片段）时按文本块兜底，不丢内容
+            block = {"kind": "text", "text": [], "item_id": None}
+            blocks[block_index] = block
+        if block.get("kind") != "text":
+            continue
         text = delta.get("text") or ""
-        if not started:
-            started = True
-            yield _event("response.output_item.added", {
-                "type": "response.output_item.added",
-                "output_index": output_index,
-                "item": {
-                    "id": item_id,
-                    "type": "message",
-                    "status": "in_progress",
-                    "role": "assistant",
-                    "content": [],
-                },
-            })
-            yield _event("response.content_part.added", {
-                "type": "response.content_part.added",
-                "item_id": item_id,
-                "output_index": output_index,
-                "content_index": content_index,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-            })
-        text_parts.append(text)
+        if not block.get("item_id"):
+            block["output_index"] = next_output_index
+            next_output_index += 1
+            for chunk in _open_message_events(block_index):
+                yield chunk
+        block["text"].append(text)
         yield _event("response.output_text.delta", {
             "type": "response.output_text.delta",
-            "item_id": item_id,
-            "output_index": output_index,
-            "content_index": content_index,
+            "item_id": block["item_id"],
+            "output_index": block["output_index"],
+            "content_index": 0,
             "delta": text,
         })
 
-    full_text = "".join(text_parts)
-    if not started:
-        yield _event("response.output_item.added", {
-            "type": "response.output_item.added",
-            "output_index": output_index,
-            "item": {
-                "id": item_id,
-                "type": "message",
-                "status": "in_progress",
-                "role": "assistant",
-                "content": [],
-            },
-        })
-        yield _event("response.content_part.added", {
-            "type": "response.content_part.added",
-            "item_id": item_id,
-            "output_index": output_index,
-            "content_index": content_index,
-            "part": {"type": "output_text", "text": "", "annotations": []},
-        })
-    yield _event("response.output_text.done", {
-        "type": "response.output_text.done",
-        "item_id": item_id,
-        "output_index": output_index,
-        "content_index": content_index,
-        "text": full_text,
-    })
-    part = {"type": "output_text", "text": full_text, "annotations": []}
-    yield _event("response.content_part.done", {
-        "type": "response.content_part.done",
-        "item_id": item_id,
-        "output_index": output_index,
-        "content_index": content_index,
-        "part": part,
-    })
-    item = {
-        "id": item_id,
-        "type": "message",
-        "status": "completed",
-        "role": "assistant",
-        "content": [part],
-    }
-    yield _event("response.output_item.done", {
-        "type": "response.output_item.done",
-        "output_index": output_index,
-        "item": item,
-    })
+    # 流结束：先关掉未关闭的 tool / message 块（上游异常中断时兜底）
+    for index in sorted(blocks):
+        block = blocks.get(index) or {}
+        if block.get("kind") == "tool":
+            for chunk in _close_tool_events(index):
+                yield chunk
+        elif block.get("kind") == "text" and block.get("item_id"):
+            for chunk in _close_message_events(index):
+                yield chunk
+    blocks.clear()
+
+    full_text = "".join(full_text_parts)
+    if not collected_tool_calls and not thinking_parts and not full_text:
+        # 上游没有任何输出：补一个空 message 项，保持事件序列完整
+        empty_index = 0
+        blocks[empty_index] = {"kind": "text", "text": [], "item_id": None, "output_index": 0}
+        for chunk in _open_message_events(empty_index):
+            yield chunk
+        for chunk in _close_message_events(empty_index):
+            yield chunk
+        blocks.clear()
+
+    if collected_tool_calls:
+        usage["tool_calls"] = collected_tool_calls
     yield _event("response.completed", {
         "type": "response.completed",
         "response": _responses_response(
@@ -1180,7 +1326,8 @@ async def _try_account(req_id, account, body, payload, incoming_headers, port, n
             _note(f"人机校验求解失败: {_safe_error_text(err, 180)}")
         try:
             return await _forward_once(req_id, account, body, payload, incoming_headers,
-                                       verify_param, use_fallback=False, retries=MAX_CAPTCHA_RETRIES)
+                                       verify_param, use_fallback=False, retries=MAX_CAPTCHA_RETRIES,
+                                       port=port)
         except _CaptchaRejected:
             _note("带验证码请求被上游拒绝")
         except _UpstreamError as err:
@@ -1220,9 +1367,14 @@ async def _try_account(req_id, account, body, payload, incoming_headers, port, n
     return _NEXT_ACCOUNT
 
 
-async def _forward_once(req_id, account, body, payload, incoming_headers, verify_param, use_fallback, retries):
+async def _forward_once(req_id, account, body, payload, incoming_headers, verify_param, use_fallback, retries,
+                        port: int | None = None):
     """单条路径转发。成功 → StreamingResponse；普通上游错误 → _UpstreamError；
-    验证码被拒 → _CaptchaRejected；账号不可用 → _AccountBad。"""
+    验证码被拒 → _CaptchaRejected；账号不可用 → _AccountBad。
+
+    验证码被上游拒绝时会失效缓存并重新求解，用新的 verify_param 重试，
+    而不是拿同一个已失效的参数反复请求。
+    """
     for attempt in range(retries):
         try:
             url, headers = build_request(account, body, verify_param, incoming_headers, use_fallback)
@@ -1265,10 +1417,18 @@ async def _forward_once(req_id, account, body, payload, incoming_headers, verify
                 await client.aclose()
 
             if _is_captcha_error(text) and status_code in (400, 401, 403):
-                if verify_param:
+                if verify_param and attempt + 1 < retries:
                     captcha_manager.invalidate()
-                    logs.warn(req_id, f"账号 {account.name} 验证码失效，刷新重试")
-                    continue  # 同路径重试（换新验证码）
+                    logs.warn(req_id, f"账号 {account.name} 验证码失效，重新求解后重试")
+                    # 重新求解并替换 verify_param；失败则保持 None 走降级链
+                    try:
+                        verify_param = await captcha_manager.get_verify_param(port) or None
+                    except Exception as err:  # noqa: BLE001
+                        logs.warn(req_id, f"验证码重求解失败: {_safe_error_text(err, 180)}")
+                        verify_param = None
+                    if verify_param:
+                        continue  # 带新验证码重试本路径
+                    raise _CaptchaRejected
                 raise _CaptchaRejected
 
             if status_code in (401, 403):
@@ -1338,9 +1498,18 @@ def _safe_json(text: str):
         return None
 
 
+# 成功请求后的即时额度刷新节流：后台 QuotaMonitor 已周期刷新，
+# 这里只在数据明显过期时才补刷，避免每个对话请求都追加一轮额度接口调用。
+_REFRESH_THROTTLE_SECONDS = 30.0
+
+
 async def _safe_refresh(account: Account) -> None:
     try:
-        if account.provider == "zai" and account.mode == "jwt":
-            await fetch_quota(account)
+        if account.provider != "zai" or account.mode != "jwt":
+            return
+        last_checked = getattr(account, "last_checked_at", None) or 0.0
+        if time.time() - last_checked < _REFRESH_THROTTLE_SECONDS:
+            return
+        await fetch_quota(account)
     except Exception:  # noqa: BLE001
         pass

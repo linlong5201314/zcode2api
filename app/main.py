@@ -109,6 +109,7 @@ def create_app() -> FastAPI:
                     "supported": [
                         "POST /v1/messages          (Anthropic Messages 协议)",
                         "POST /v1/chat/completions  (OpenAI 兼容)",
+                        "POST /v1/responses         (OpenAI Responses / Codex)",
                         "GET  /v1/models",
                     ],
                     "hint": "Anthropic/OpenAI 客户端的 base_url 应填网关根地址（结尾不要带 /v1）；"

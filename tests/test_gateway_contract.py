@@ -199,3 +199,74 @@ def test_responses_sse_emits_standard_text_events() -> None:
     assert "event: response.output_text.delta" in joined
     assert '"delta": "ok"' in joined
     assert "event: response.completed" in joined
+
+
+def test_responses_sse_sequence_numbers_are_strictly_increasing() -> None:
+    async def collect() -> list[int]:
+        sequence: list[int] = []
+        async for chunk in _responses_sse(_split_sse_frames(), "GLM-5.3", "resp_test"):
+            for line in chunk.decode().splitlines():
+                if line.startswith("data: ") and not line.startswith("data: ["):
+                    import json as _json
+                    payload = _json.loads(line[6:])
+                    if isinstance(payload, dict) and "sequence_number" in payload:
+                        sequence.append(payload["sequence_number"])
+        return sequence
+
+    sequence = asyncio.run(collect())
+
+    assert sequence, "至少应产出携带 sequence_number 的事件"
+    assert sequence == sorted(sequence), "sequence_number 必须单调递增"
+    assert len(set(sequence)) == len(sequence), "sequence_number 不得重复"
+
+
+async def _tool_call_frames():
+    """一个带 tool_use 块的 Anthropic SSE 流（模拟上游返回工具调用）。"""
+    payload = (
+        b'event: message_start\r\ndata: {"message":{"usage":{"input_tokens":5}}}\r\n\r\n'
+        b'event: content_block_start\r\ndata: {"index":0,"content_block":{"type":"text","text":""}}\r\n\r\n'
+        b'event: content_block_delta\r\ndata: {"index":0,"delta":{"type":"text_delta","text":"calling"}}\r\n\r\n'
+        b'event: content_block_stop\r\ndata: {"index":0}\r\n\r\n'
+        b'event: content_block_start\r\ndata: {"index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"shell","input":{}}}\r\n\r\n'
+        b'event: content_block_delta\r\ndata: {"index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"cmd\\":"}}\r\n\r\n'
+        b'event: content_block_delta\r\ndata: {"index":1,"delta":{"type":"input_json_delta","partial_json":"\\"ls\\"}"}}\r\n\r\n'
+        b'event: content_block_stop\r\ndata: {"index":1}\r\n\r\n'
+        b'event: message_delta\r\ndata: {"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":9}}\r\n\r\n'
+    )
+    for index in range(0, len(payload), 7):
+        yield payload[index:index + 7]
+
+
+def test_responses_sse_converts_tool_use_to_function_call_events() -> None:
+    async def collect() -> list[bytes]:
+        return [chunk async for chunk in _responses_sse(_tool_call_frames(), "GLM-5.3", "resp_tool")]
+
+    joined = b"".join(asyncio.run(collect())).decode()
+
+    # function_call 输出项生命周期完整
+    assert '"type": "function_call"' in joined
+    assert "event: response.function_call_arguments.delta" in joined
+    assert "event: response.function_call_arguments.done" in joined
+    assert '"name": "shell"' in joined
+    assert '"call_id": "toolu_01"' in joined
+    # 参数分片按顺序到达并完成聚合
+    assert '"delta": "{\\"cmd\\":"' in joined
+    assert '"arguments": "{\\"cmd\\":\\"ls\\"}"' in joined
+    # 文本部分保留
+    assert '"delta": "calling"' in joined
+    # completed 事件中携带工具调用与用量
+    assert "event: response.completed" in joined
+    assert '"input_tokens": 5' in joined
+    assert '"output_tokens": 9' in joined
+
+
+def test_openai_sse_streams_tool_calls() -> None:
+    async def collect() -> list[bytes]:
+        return [chunk async for chunk in _openai_sse(_tool_call_frames(), "GLM-5.3")]
+
+    joined = b"".join(asyncio.run(collect())).decode()
+
+    assert '"name": "shell"' in joined
+    assert '"arguments": "{\\"cmd\\":"' in joined
+    assert '"finish_reason": "tool_calls"' in joined
+    assert joined.endswith("data: [DONE]\n\n")
