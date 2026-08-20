@@ -60,7 +60,14 @@
       const user=await adminUser.get();
       const key=await adminKey.get();
       if(user)userEl.value=user;
-      if(key)try{if(await verifyKey(ADMIN_API+'/verify',key,user||userEl.value.trim()))location.href='/admin/accounts';}catch{}
+      if(key)try{
+        const u=user||userEl.value.trim();
+        if(await verifyKey(ADMIN_API+'/verify',key,u)){
+          // 持久化实际生效的账号，保证后续页面请求携带一致的 X-Admin-User
+          if(u&&u!==user)await adminUser.set(u);
+          location.href='/admin/accounts';
+        }
+      }catch{}
     })();
   </script>
 </body>

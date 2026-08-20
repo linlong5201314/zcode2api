@@ -68,7 +68,7 @@
   await renderAdminHeader();
   const key=await adminKey.get();
   const user=await adminUser.get();
-  if(!key||!await verifyKey(ADMIN_API+'/verify',key,user).catch(()=>false))return location.href='/admin/login';
+  if(!key||!await verifyKey(ADMIN_API+'/verify',key,user).catch(()=>false)){adminKey.clear();adminUser.clear();return location.href='/admin/login';}
   document.getElementById('endpoint').textContent=location.origin+'/v1/messages';
   const eo=document.getElementById('endpoint-openai');
   if(eo)eo.textContent=location.origin+'/v1/chat/completions';
