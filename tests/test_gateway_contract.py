@@ -10,6 +10,9 @@ from app.routes.gateway import (
     _normalize_body,
     _openai_to_anthropic,
     _openai_sse,
+    _responses_response,
+    _responses_sse,
+    _responses_to_anthropic,
     _validate_messages_body,
 )
 
@@ -93,6 +96,36 @@ def test_openai_conversion_preserves_tools_and_tool_messages() -> None:
     assert converted["messages"][2]["content"][0]["type"] == "tool_result"
 
 
+def test_responses_conversion_supports_string_input_and_tools() -> None:
+    converted = _responses_to_anthropic({
+        "model": "glm-5.3",
+        "instructions": "Be concise.",
+        "input": "hello",
+        "max_output_tokens": 2048,
+        "tools": [{"type": "function", "name": "weather", "parameters": {"type": "object"}}],
+    })
+
+    assert converted["system"] == "Be concise."
+    assert converted["messages"][0]["content"][0]["text"] == "hello"
+    assert converted["max_tokens"] == 2048
+    assert converted["tools"][0]["name"] == "weather"
+
+
+def test_responses_response_shape_is_codex_friendly() -> None:
+    payload = _responses_response(
+        "GLM-5.3",
+        "resp_test",
+        "ok",
+        "",
+        {"input_tokens": 2, "output_tokens": 1},
+    )
+
+    assert payload["object"] == "response"
+    assert payload["status"] == "completed"
+    assert payload["output"][0]["content"][0]["type"] == "output_text"
+    assert payload["output_text"] == "ok"
+
+
 async def _split_sse_frames():
     payload = (
         b'event: message_start\r\ndata: {"message":{"usage":{"input_tokens":3}}}\r\n\r\n'
@@ -126,3 +159,43 @@ def test_openai_sse_keeps_events_split_across_http_chunks() -> None:
     assert '"content": "ok"' in joined
     assert '"finish_reason": "stop"' in joined
     assert joined.endswith("data: [DONE]\n\n")
+
+
+def test_openai_sse_emits_usage_chunk_when_include_usage() -> None:
+    async def collect() -> list[bytes]:
+        return [
+            chunk async for chunk in _openai_sse(_split_sse_frames(), "GLM-5.3", True)
+        ]
+
+    chunks = asyncio.run(collect())
+    joined = b"".join(chunks).decode()
+
+    assert '"finish_reason": "stop"' in joined
+    # 末尾 usage chunk：choices 为空数组，携带完整用量
+    assert '"choices": []' in joined
+    assert '"prompt_tokens": 3' in joined
+    assert '"completion_tokens": 2' in joined
+    assert '"total_tokens": 5' in joined
+    assert joined.endswith("data: [DONE]\n\n")
+
+
+def test_openai_sse_omits_usage_without_include_usage() -> None:
+    async def collect() -> list[bytes]:
+        return [chunk async for chunk in _openai_sse(_split_sse_frames(), "GLM-5.3")]
+
+    joined = b"".join(asyncio.run(collect())).decode()
+
+    assert "prompt_tokens" not in joined
+    assert '"choices": []' not in joined
+
+
+def test_responses_sse_emits_standard_text_events() -> None:
+    async def collect() -> list[bytes]:
+        return [chunk async for chunk in _responses_sse(_split_sse_frames(), "GLM-5.3", "resp_test")]
+
+    joined = b"".join(asyncio.run(collect())).decode()
+
+    assert "event: response.created" in joined
+    assert "event: response.output_text.delta" in joined
+    assert '"delta": "ok"' in joined
+    assert "event: response.completed" in joined

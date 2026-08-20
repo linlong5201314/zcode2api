@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>zcode2api · 设置</title>
-  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
   <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
 </head>
 <body>
@@ -20,6 +19,11 @@
 
   <div class="settings-card">
     <div class="section-title" style="margin-bottom:16px">鉴权</div>
+    <div class="settings-row">
+      <label>后台账号</label>
+      <div class="hint">用于登录管理后台。留空可退回“仅密码”模式；推荐保持账号密码双因子式入口。</div>
+      <input class="input" id="admin-user" type="text" placeholder="admin" autocomplete="username">
+    </div>
     <div class="settings-row">
       <label>后台密码</label>
       <div class="hint">用于登录此管理后台。修改后需用新密码重新登录。</div>
@@ -49,7 +53,9 @@
       · 请求按顺序轮询分发；某账号额度用完会自动切换到下一个账号。<br>
       · 账号额度、状态在「账号池」页实时刷新展示。<br>
       · 出口代理在「代理设置」页配置，云端部署绕过 IP 风控。<br>
-      · 对话端点：<code id="endpoint">/v1/messages</code>（兼容 Anthropic 消息协议）。
+      · Anthropic 端点：<code id="endpoint">/v1/messages</code><br>
+      · OpenAI 端点：<code id="endpoint-openai">/v1/chat/completions</code>（兼容 Cherry Studio / LobeChat / NextChat 等客户端，支持流式与 token 用量统计）<br>
+      · Responses 端点：<code>/v1/responses</code>（Codex CLI / 新版 OpenAI SDK 可直连）。
     </div>
   </div>
 </main>
@@ -61,8 +67,11 @@
 (async()=>{
   await renderAdminHeader();
   const key=await adminKey.get();
-  if(!key||!await verifyKey(ADMIN_API+'/verify',key).catch(()=>false))return location.href='/admin/login';
+  const user=await adminUser.get();
+  if(!key||!await verifyKey(ADMIN_API+'/verify',key,user).catch(()=>false))return location.href='/admin/login';
   document.getElementById('endpoint').textContent=location.origin+'/v1/messages';
+  const eo=document.getElementById('endpoint-openai');
+  if(eo)eo.textContent=location.origin+'/v1/chat/completions';
   load();
 })();
 
@@ -71,6 +80,7 @@ async function load(){
     const d=await api('GET','/settings');
     document.getElementById('admin-key').value='';
     document.getElementById('gateway-key').value='';
+    document.getElementById('admin-user').value=d.admin_user||'';
     document.getElementById('admin-key-state').textContent=d.admin_key_set?`当前已设置（${d.admin_key_hint||'已隐藏'}）`:'当前未设置';
     document.getElementById('gateway-key-state').textContent=d.gateway_key_set?`当前已设置（${d.gateway_key_hint||'已隐藏'}）`:'当前未设置（免鉴权）';
     document.getElementById('quota-interval').value=d.quota_refresh_interval??60;
@@ -79,14 +89,16 @@ async function load(){
 
 async function saveSettings(){
   const admin_key=document.getElementById('admin-key').value.trim();
+  const admin_user=document.getElementById('admin-user').value.trim();
   const gateway_key=document.getElementById('gateway-key').value.trim();
   const quota_refresh_interval=parseInt(document.getElementById('quota-interval').value,10);
   if(isNaN(quota_refresh_interval)||quota_refresh_interval<0)return showToast('刷新间隔必须是非负整数','error');
-  const payload={quota_refresh_interval};
+  const payload={quota_refresh_interval,admin_user};
   if(admin_key)payload.admin_key=admin_key;
   if(gateway_key)payload.gateway_key=gateway_key;
   try{
     await api('PUT','/settings',payload);
+    await adminUser.set(admin_user);
     if(admin_key)await adminKey.set(admin_key);   // 同步本地保存，避免改密后被登出
     await load();
     showToast('已保存','success');

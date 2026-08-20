@@ -28,7 +28,9 @@ def _extract_bearer(authorization: str | None) -> str | None:
 
 async def verify_admin_key(
     authorization: str | None = Header(default=None),
+    x_admin_user: str | None = Header(default=None, alias="x-admin-user"),
     app_key: str | None = Query(default=None),
+    app_user: str | None = Query(default=None),
 ) -> None:
     """校验后台管理密钥。
 
@@ -38,6 +40,12 @@ async def verify_admin_key(
     key = store.admin_key()
     if not key:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未配置后台密钥")
+
+    user = store.admin_user()
+    if user:
+        supplied_user = _safe_token(x_admin_user or app_user)
+        if supplied_user is None or not hmac.compare_digest(supplied_user, user):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "后台账号无效")
 
     token = _safe_token(_extract_bearer(authorization) or app_key)
     if token is None:

@@ -3,41 +3,64 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>zcode2api · 登录</title>
-  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <title>zcode2api · 樱云阁</title>
   <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
 </head>
 <body class="login-body">
+  <!-- 飘落樱瓣（纯 CSS） -->
+  <div class="petal"></div><div class="petal"></div><div class="petal"></div>
+  <div class="petal"></div><div class="petal"></div><div class="petal"></div>
+  <div class="petal"></div>
+
   <div class="login-shell">
     <div class="login-card">
-      <div class="login-brand">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
-        <span>zcode2api</span>
-      </div>
-      <div class="login-title">后台管理</div>
-      <div class="login-subtitle">请输入后台密码以继续</div>
+      <!-- 可爱海鸥（吉祥物） -->
+      <svg style="position:absolute;top:18px;left:22px;width:44px;height:34px" viewBox="0 0 88 68" fill="none">
+        <ellipse cx="44" cy="40" rx="26" ry="18" fill="#ffffff" stroke="#d8c8b4" stroke-width="2"/>
+        <path d="M20 36 C10 30 6 22 8 14 C16 18 24 22 30 30 Z" fill="#f5e9dc" stroke="#d8c8b4" stroke-width="2" stroke-linejoin="round"/>
+        <path d="M22 34 C15 30 12 25 12 20" stroke="#d9798b" stroke-width="1.6" stroke-linecap="round"/>
+        <circle cx="54" cy="32" r="3.4" fill="#3d342a"/>
+        <circle cx="55.2" cy="30.8" r="1.1" fill="#fff"/>
+        <path d="M68 36 L80 40 L68 44 Z" fill="#e8a23f"/>
+        <path d="M34 54 l4 7 M50 54 l-4 7" stroke="#e8a23f" stroke-width="2.4" stroke-linecap="round"/>
+        <path d="M40 22 c3-5 8-6 11-3" stroke="#d9798b" stroke-width="2" stroke-linecap="round" opacity=".7"/>
+      </svg>
+
+      <div class="login-seal">知码</div>
+      <div class="login-brand">zcode2api</div>
+      <div class="login-title">樱云阁</div>
+      <div class="login-subtitle">账号密码登录 · 默认 admin / zcode</div>
       <div class="login-form">
+        <input type="text" id="user" placeholder="账号" class="input" autocomplete="username" value="admin">
         <input type="password" id="key" placeholder="后台密码" class="input">
-        <button onclick="login()" class="btn btn-primary w-full">继续</button>
+        <button onclick="login()" class="btn btn-primary w-full">进入阁中</button>
       </div>
     </div>
   </div>
   <script src="/static/js/auth.js?v={{APP_VERSION}}"></script>
   <script src="/static/js/toast.js?v={{APP_VERSION}}"></script>
   <script>
+    const userEl=document.getElementById('user');
     const el=document.getElementById('key');
-    el.addEventListener('keypress',e=>{if(e.key==='Enter')login();});
+    [userEl,el].forEach(x=>x.addEventListener('keypress',e=>{if(e.key==='Enter')login();}));
     async function login(){
+      const user=userEl.value.trim();
       const key=el.value.trim();
-      if(!key)return;
+      if(!user||!key)return;
       try{
-        if(await verifyKey(ADMIN_API+'/verify',key)){await adminKey.set(key);location.href='/admin/accounts';}
-        else showToast('密码无效','error');
+        if(await verifyKey(ADMIN_API+'/verify',key,user)){
+          await adminUser.set(user);
+          await adminKey.set(key);
+          location.href='/admin/accounts';
+        }
+        else showToast('账号或密码无效','error');
       }catch{showToast('连接失败','error');}
     }
     (async()=>{
+      const user=await adminUser.get();
       const key=await adminKey.get();
-      if(key)try{if(await verifyKey(ADMIN_API+'/verify',key))location.href='/admin/accounts';}catch{}
+      if(user)userEl.value=user;
+      if(key)try{if(await verifyKey(ADMIN_API+'/verify',key,user||userEl.value.trim()))location.href='/admin/accounts';}catch{}
     })();
   </script>
 </body>

@@ -301,11 +301,20 @@ async def _read_json_body(request: Request) -> tuple[object | None, JSONResponse
 # ── 模型列表 ─────────────────────────────────────────────────────────────────
 @router.get("/v1/models", dependencies=[Depends(verify_gateway_key)])
 async def list_models():
-    """列出可用模型（Anthropic /v1/models 风格）。"""
+    """列出可用模型。同时兼容 OpenAI /v1/models 与 Anthropic /v1/models 字段。"""
+    now = int(time.time())
     return {
         "object": "list",
         "data": [
-            {"id": i, "type": "model", "display_name": i, "created_at": "2025-01-01T00:00:00Z"}
+            {
+                "id": i,
+                "object": "model",       # OpenAI 客户端校验字段
+                "type": "model",         # Anthropic 客户端校验字段
+                "display_name": i,
+                "created": now,          # OpenAI 风格时间戳
+                "created_at": "2025-01-01T00:00:00Z",  # Anthropic 风格
+                "owned_by": "zcode2api",
+            }
             for i in AVAILABLE_MODELS
         ],
     }
@@ -378,8 +387,12 @@ async def chat_completions(request: Request):
     if not isinstance(resp, StreamingResponse) or resp.status_code >= 400:
         return _openai_error(resp)
     if body.get("stream"):
+        stream_options = body.get("stream_options")
+        include_usage = bool(
+            isinstance(stream_options, dict) and stream_options.get("include_usage")
+        )
         return StreamingResponse(
-            _openai_sse(resp.body_iterator, str(body.get("model") or "gpt-4o")),
+            _openai_sse(resp.body_iterator, str(body.get("model") or "gpt-4o"), include_usage),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
@@ -390,6 +403,52 @@ async def chat_completions(request: Request):
 @router.post("/v1/v1/chat/completions", include_in_schema=False, dependencies=[Depends(verify_gateway_key)])
 async def chat_completions_v1_alias(request: Request):
     return await chat_completions(request)
+
+
+@router.post("/v1/responses", dependencies=[Depends(verify_gateway_key)])
+async def responses(request: Request):
+    """OpenAI Responses API 兼容层（Codex / 新版 OpenAI SDK 可直连）。"""
+    body, error = await _read_json_body(request)
+    if error is not None:
+        return error
+
+    incoming_headers = dict(request.headers)
+    try:
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON object")
+        if "stream" in body and not isinstance(body["stream"], bool):
+            raise ValueError("stream must be a boolean")
+        provider = _detect_provider(body, incoming_headers)
+        anthropic_body = _responses_to_anthropic(body)
+        anthropic_body["stream"] = True
+        anthropic_body = _normalize_body(anthropic_body)
+        _validate_messages_body(anthropic_body)
+    except (TypeError, ValueError) as err:
+        return _invalid_request(str(err))
+    port = request.url.port or settings.PORT
+
+    req_id = getattr(request.state, "request_id", None) or secrets.token_hex(3)
+    logs.req(req_id, str(anthropic_body.get("model") or "-"), bool(body.get("stream")),
+             _last_user_text(anthropic_body))
+    resp = await _relay(req_id, anthropic_body, incoming_headers, port, provider=provider)
+
+    if not isinstance(resp, StreamingResponse) or resp.status_code >= 400:
+        return _openai_error(resp)
+    model = str(body.get("model") or anthropic_body.get("model") or "GLM-5.3")
+    response_id = f"resp_{secrets.token_hex(12)}"
+    if body.get("stream"):
+        return StreamingResponse(
+            _responses_sse(resp.body_iterator, model, response_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+    text, thinking, usage = await _collect_anthropic(resp.body_iterator)
+    return JSONResponse(_responses_response(model, response_id, text, thinking, usage))
+
+
+@router.post("/v1/v1/responses", include_in_schema=False, dependencies=[Depends(verify_gateway_key)])
+async def responses_v1_alias(request: Request):
+    return await responses(request)
 
 
 def _openai_to_anthropic(body: dict) -> dict:
@@ -497,14 +556,23 @@ def _openai_to_anthropic(body: dict) -> dict:
     for tool in body.get("tools") or []:
         if not isinstance(tool, dict):
             continue
-        function = tool.get("function") if tool.get("type") == "function" else tool
+        function = tool.get("function") if (
+            tool.get("type") == "function" and isinstance(tool.get("function"), dict)
+        ) else tool
         if not isinstance(function, dict) or not function.get("name"):
             continue
         tools.append({
             "name": str(function["name"]),
             "description": str(function.get("description") or ""),
-            "input_schema": function.get("parameters")
-            if isinstance(function.get("parameters"), dict)
+            "input_schema": (
+                function.get("parameters")
+                or function.get("input_schema")
+                or function.get("schema")
+            )
+            if isinstance(
+                function.get("parameters") or function.get("input_schema") or function.get("schema"),
+                dict,
+            )
             else {"type": "object", "properties": {}},
         })
     if tools:
@@ -520,6 +588,105 @@ def _openai_to_anthropic(body: dict) -> dict:
         if isinstance(function, dict) and function.get("name"):
             out["tool_choice"] = {"type": "tool", "name": str(function["name"])}
     return out
+
+
+def _responses_content_to_text(content) -> str:
+    """Flatten Responses API content blocks into plain text for Anthropic input."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        value = (
+            part.get("text")
+            or part.get("input_text")
+            or part.get("output_text")
+        )
+        if isinstance(value, str):
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _responses_to_anthropic(body: dict) -> dict:
+    """OpenAI Responses 请求体 → Anthropic Messages 请求体。"""
+    if not isinstance(body, dict):
+        raise ValueError("请求体必须是 JSON object")
+    model = body.get("model") or "GLM-5.3"
+    messages: list[dict] = []
+    system_parts: list[str] = []
+    instructions = body.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        system_parts.append(instructions.strip())
+
+    input_value = body.get("input")
+    if isinstance(input_value, str):
+        messages.append({"role": "user", "content": input_value})
+    elif isinstance(input_value, list):
+        for item in input_value:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            role = item.get("role")
+            if item_type == "message" or role in ("user", "assistant", "system", "developer"):
+                text = _responses_content_to_text(item.get("content"))
+                if not text and isinstance(item.get("content"), str):
+                    text = item["content"]
+                if role in ("system", "developer"):
+                    if text:
+                        system_parts.append(text)
+                elif role in ("user", "assistant") and text:
+                    messages.append({"role": role, "content": text})
+            elif item_type == "function_call_output":
+                call_id = str(item.get("call_id") or item.get("tool_call_id") or "")
+                output = _responses_content_to_text(item.get("output"))
+                if call_id:
+                    messages.append({"role": "tool", "tool_call_id": call_id, "content": output})
+            elif item_type == "function_call":
+                name = str(item.get("name") or "tool")
+                call_id = str(item.get("call_id") or item.get("id") or secrets.token_hex(8))
+                arguments = item.get("arguments") or "{}"
+                messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": arguments},
+                    }],
+                })
+    else:
+        raise ValueError("input must be a string or array")
+
+    if not messages:
+        raise ValueError("input must contain at least one message")
+
+    chat_body: dict = {
+        "model": model,
+        "messages": messages,
+        "stream": bool(body.get("stream")),
+    }
+    if system_parts:
+        chat_body["messages"] = [{"role": "system", "content": "\n\n".join(system_parts)}] + messages
+    if "max_output_tokens" in body:
+        chat_body["max_tokens"] = body["max_output_tokens"]
+    elif "max_tokens" in body:
+        chat_body["max_tokens"] = body["max_tokens"]
+    if body.get("temperature") is not None:
+        chat_body["temperature"] = body["temperature"]
+    if body.get("top_p") is not None:
+        chat_body["top_p"] = body["top_p"]
+    if body.get("tools"):
+        chat_body["tools"] = body["tools"]
+    if body.get("tool_choice"):
+        chat_body["tool_choice"] = body["tool_choice"]
+    if body.get("reasoning") and isinstance(body["reasoning"], dict):
+        effort = body["reasoning"].get("effort")
+        if effort:
+            chat_body["reasoning_effort"] = effort
+    return _openai_to_anthropic(chat_body)
 
 
 def _openai_finish(stop_reason: str | None) -> str:
@@ -547,7 +714,8 @@ def _openai_response(model: str, text: str, thinking: str, usage: dict) -> dict:
         message["reasoning_content"] = thinking  # DeepSeek 风格，兼容支持思考展示的客户端
     tool_calls = usage.get("tool_calls") or []
     if tool_calls:
-        message["content"] = None
+        if not text:
+            message["content"] = None
         message["tool_calls"] = [
             {
                 "id": call.get("id") or f"call_{secrets.token_hex(8)}",
@@ -574,6 +742,53 @@ def _openai_response(model: str, text: str, thinking: str, usage: dict) -> dict:
             "completion_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
         },
+    }
+
+
+def _responses_usage(usage: dict) -> dict:
+    input_tokens = _usage_count(usage.get("input_tokens"))
+    output_tokens = _usage_count(usage.get("output_tokens"))
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _responses_response(model: str, response_id: str, text: str, thinking: str, usage: dict) -> dict:
+    output: list[dict] = []
+    if thinking:
+        output.append({
+            "id": f"rs_{secrets.token_hex(8)}",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": thinking}],
+        })
+    tool_calls = usage.get("tool_calls") or []
+    for call in tool_calls:
+        output.append({
+            "id": call.get("id") or f"fc_{secrets.token_hex(8)}",
+            "type": "function_call",
+            "call_id": call.get("id") or f"call_{secrets.token_hex(8)}",
+            "name": call.get("name") or "tool",
+            "arguments": json.dumps(call.get("input") or {}, ensure_ascii=False),
+        })
+    if text or not output:
+        output.append({
+            "id": f"msg_{secrets.token_hex(8)}",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        })
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": model,
+        "output": output,
+        "output_text": text,
+        "usage": _responses_usage(usage),
     }
 
 
@@ -639,20 +854,27 @@ async def _collect_anthropic(body_iter) -> tuple[str, str, dict]:
     return "".join(parts), "".join(thinking), usage
 
 
-async def _openai_sse(body_iter, model: str):
-    """把 Anthropic SSE 流转换为 OpenAI chat.completion.chunk 流。"""
+async def _openai_sse(body_iter, model: str, include_usage: bool = False):
+    """把 Anthropic SSE 流转换为 OpenAI chat.completion.chunk 流。
+
+    include_usage=True 时（对应 stream_options.include_usage），在流末尾追加
+    一个 choices 为空、携带 usage 的 chunk，供统计 token 用量的客户端使用。
+    """
     now = int(time.time())
     cid = f"chatcmpl-{secrets.token_hex(12)}"
     stop_reason: str | None = None
     first = True
     tool_indices: dict[int, int] = {}
     next_tool_index = 0
+    usage: dict = {}
 
-    def _chunk(delta: dict, finish: str | None) -> bytes:
+    def _chunk(delta: dict, finish: str | None, chunk_usage=None) -> bytes:
         payload = {
             "id": cid, "object": "chat.completion.chunk", "created": now, "model": model,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
+        if include_usage:
+            payload["usage"] = chunk_usage  # OpenAI 规范：非末尾 chunk 的 usage 为 null
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
     async for event, data in _iter_anthropic_events(body_iter):
@@ -665,7 +887,7 @@ async def _openai_sse(body_iter, model: str):
                 tool_indices[source_index] = tool_index
                 if first:
                     first = False
-                    yield _chunk({"role": "assistant", "content": None}, None)
+                    yield _chunk({"role": "assistant", "content": ""}, None)
                 yield _chunk({
                     "tool_calls": [{
                         "index": tool_index,
@@ -695,12 +917,167 @@ async def _openai_sse(body_iter, model: str):
                         "function": {"arguments": delta.get("partial_json") or ""},
                     }]
                 }, None)
+        elif event == "message_start":
+            usage["input_tokens"] = ((data.get("message") or {}).get("usage") or {}).get(
+                "input_tokens", 0)
         elif event == "message_delta":
             stop_reason = (data.get("delta") or {}).get("stop_reason") or stop_reason
+            upstream_usage = data.get("usage") or {}
+            if upstream_usage.get("output_tokens") is not None:
+                usage["output_tokens"] = upstream_usage.get("output_tokens")
 
     if first:  # 上游没有任何文本增量（罕见），补发 role 块
         yield _chunk({"role": "assistant", "content": ""}, None)
     yield _chunk({}, _openai_finish(stop_reason) or "stop")
+    if include_usage:
+        input_tokens = _usage_count(usage.get("input_tokens"))
+        output_tokens = _usage_count(usage.get("output_tokens"))
+        final_usage = {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+        payload = {
+            "id": cid, "object": "chat.completion.chunk", "created": now, "model": model,
+            "choices": [],  # OpenAI 规范：usage chunk 的 choices 为空数组
+            "usage": final_usage,
+        }
+        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+    yield b"data: [DONE]\n\n"
+
+
+async def _responses_sse(body_iter, model: str, response_id: str):
+    """把 Anthropic SSE 流转换为 OpenAI Responses API SSE 流。"""
+    created_at = int(time.time())
+    item_id = f"msg_{secrets.token_hex(8)}"
+    content_index = 0
+    output_index = 0
+    text_parts: list[str] = []
+    thinking_parts: list[str] = []
+    usage: dict = {}
+    started = False
+
+    def _event(name: str, payload: dict) -> bytes:
+        payload.setdefault("sequence_number", len(text_parts) + len(thinking_parts))
+        return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+
+    yield _event("response.created", {
+        "type": "response.created",
+        "response": {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": "in_progress",
+            "model": model,
+            "output": [],
+        },
+    })
+
+    async for event, data in _iter_anthropic_events(body_iter):
+        if event == "message_start":
+            usage["input_tokens"] = ((data.get("message") or {}).get("usage") or {}).get("input_tokens", 0)
+            continue
+        if event == "message_delta":
+            usage["output_tokens"] = (data.get("usage") or {}).get("output_tokens", 0)
+            usage["stop_reason"] = (data.get("delta") or {}).get("stop_reason")
+            continue
+        if event != "content_block_delta":
+            continue
+        delta = data.get("delta") or {}
+        if delta.get("type") == "thinking_delta":
+            thinking = delta.get("thinking") or ""
+            if thinking:
+                thinking_parts.append(thinking)
+            continue
+        if delta.get("type") != "text_delta":
+            continue
+        text = delta.get("text") or ""
+        if not started:
+            started = True
+            yield _event("response.output_item.added", {
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "message",
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": [],
+                },
+            })
+            yield _event("response.content_part.added", {
+                "type": "response.content_part.added",
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": content_index,
+                "part": {"type": "output_text", "text": "", "annotations": []},
+            })
+        text_parts.append(text)
+        yield _event("response.output_text.delta", {
+            "type": "response.output_text.delta",
+            "item_id": item_id,
+            "output_index": output_index,
+            "content_index": content_index,
+            "delta": text,
+        })
+
+    full_text = "".join(text_parts)
+    if not started:
+        yield _event("response.output_item.added", {
+            "type": "response.output_item.added",
+            "output_index": output_index,
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "status": "in_progress",
+                "role": "assistant",
+                "content": [],
+            },
+        })
+        yield _event("response.content_part.added", {
+            "type": "response.content_part.added",
+            "item_id": item_id,
+            "output_index": output_index,
+            "content_index": content_index,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        })
+    yield _event("response.output_text.done", {
+        "type": "response.output_text.done",
+        "item_id": item_id,
+        "output_index": output_index,
+        "content_index": content_index,
+        "text": full_text,
+    })
+    part = {"type": "output_text", "text": full_text, "annotations": []}
+    yield _event("response.content_part.done", {
+        "type": "response.content_part.done",
+        "item_id": item_id,
+        "output_index": output_index,
+        "content_index": content_index,
+        "part": part,
+    })
+    item = {
+        "id": item_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [part],
+    }
+    yield _event("response.output_item.done", {
+        "type": "response.output_item.done",
+        "output_index": output_index,
+        "item": item,
+    })
+    yield _event("response.completed", {
+        "type": "response.completed",
+        "response": _responses_response(
+            model,
+            response_id,
+            full_text,
+            "".join(thinking_parts),
+            usage,
+        ),
+    })
     yield b"data: [DONE]\n\n"
 
 

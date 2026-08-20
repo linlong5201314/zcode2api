@@ -95,7 +95,7 @@ graph TD
 | Account Store | `app/store.py` | SQLite 持久化 + 内存账号表 + round-robin 游标 + 设置(meta) |
 | Account Model | `app/models.py` | `Account` 数据类、`Status` 状态、可选中判定、脱敏视图 |
 | Request Builder | `app/agent.py` | 按凭证选上游端点、组装请求头(含 `X-Aliyun-Captcha-Verify-Param`) |
-| Quota Monitor | `app/quota.py` | 单账号额度查询 + 状态判定 + 后台周期刷新任务 |
+| Quota Monitor | `app/quota.py` | 兼容旧版 billing 与新版订阅/配额接口的单账号查询、状态判定、后台周期刷新任务 |
 | Captcha Manager | `app/captcha.py` | 拉取验证码配置、启动无头 Chrome 求解、缓存/并发去重/重试 |
 | Captcha Solver | `app/captcha.py`(Playwright) | 无头 Chrome（真实二进制）跑阿里云无痕 SDK,输出 `verifyParam` |
 | OAuth Flow | `app/oauth.py` | Z.AI OAuth（授权码中转）：构造授权链接 → 浏览器登录后复制回跳 code → 兑换 Coding Plan JWT / API Key |
@@ -202,6 +202,20 @@ return pool[idx]
 ```
 
 `skip_ids` 保证同一次请求不会重复尝试已失败的账号。
+
+---
+
+## 5.1 Coding Plan 额度刷新
+
+JWT 账号刷新时并行读取旧版 `zcode.z.ai` billing 接口，以及当前客户端使用的
+`api.z.ai/api/biz/subscription/list`（订阅状态）和
+`api.z.ai/api/monitor/usage/quota/limit`（配额限制）接口。解析器兼容顶层或
+`data` 包装、`balances` / `limits` 列表或映射，以及 `available_units`、
+`remaining_units`、`period_end` 等字段。成功发现剩余额度时会将此前的
+`exhausted` / `invalid` 快照恢复为 `active`；明确返回
+`coding_plan_not_entitled` 时保留凭证、标记为不可轮询并提示套餐尚未激活；后续
+刷新发现有效套餐会自动恢复。这里的“激活”只反映上游授予的订阅状态，网关不会
+伪造或绕过平台计费/授权。
 
 ---
 
@@ -312,8 +326,9 @@ meta(      key PK, value )      # admin_key / gateway_key / quota_refresh_interv
 > **说明**:由于作者**没有可长期使用的付费 Coding Plan 账号**,以下行为**未能充分实测验证**,
 > 文档中的相关描述基于上游接口的观测与推断,可能与真实上游存在偏差。欢迎有条件的使用者反馈/纠正:
 
-- **额度/计费字段**:`billing/current`、`billing/balance`、`usage` 的返回结构与字段含义(如
-  `total_units` / `used_units` / `remaining_units` / `expires_at`)主要依据观测,不同套餐可能不一致。
+- **额度/计费字段**:解析器已覆盖 `billing/*` 与当前订阅/配额接口的常见结构（包括
+  `balances` / `limits`、`available_units` / `remaining_units`），但不同地区、套餐或
+  上游版本仍可能增加未记录的字段；遇到异常请附脱敏后的 JSON 结构。
 - **额度用完判定**:`exhausted` 触发条件(余额=0、HTTP 402、错误体含 `quota/insufficient/余额` 等关键字)
   为启发式;真实上游的耗尽信号若不同,可能需要调整 `app/quota.py` / `app/routes/gateway.py` 的判定。
 - **模型清单**:`/v1/models` 当前固定为 `GLM-5.3`、`GLM-5.2` 与 `GLM-5-Turbo`,未做上游动态拉取。

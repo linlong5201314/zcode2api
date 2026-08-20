@@ -22,19 +22,21 @@ def _html(name: str) -> HTMLResponse:
 
 
 def _callback_page(ok: bool, message: str) -> HTMLResponse:
-    """浏览器回跳结果页（极简中文提示，自动尝试关闭窗口）。"""
-    color = "#16a34a" if ok else "#dc2626"
+    """浏览器回跳结果页（樱云阁风格，自动尝试关闭窗口）。"""
+    color = "#6fa58e" if ok else "#c05a4e"
     icon = "✔" if ok else "✘"
     return HTMLResponse(
         f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
-<title>授权结果</title><style>
-body{{margin:0;font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-background:#f7f7f8;color:#18181b;display:flex;align-items:center;justify-content:center;height:100vh}}
-.card{{background:#fff;border:1px solid #e4e4e7;border-radius:14px;padding:40px 48px;
-text-align:center;box-shadow:0 6px 24px rgba(0,0,0,.05);max-width:420px}}
-.icon{{width:52px;height:52px;border-radius:50%;color:#fff;font-size:28px;line-height:52px;
-margin:0 auto 16px;background:{color}}}
-h1{{font-size:18px;margin:0 0 10px}}p{{font-size:13px;color:#71717a;margin:0;line-height:1.8}}
+<title>授权结果 · 樱云阁</title><style>
+body{{margin:0;font-family:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+background:linear-gradient(160deg,#fdf8ef,#fbf3f1 45%,#f2f8f2);color:#3d342a;display:flex;
+align-items:center;justify-content:center;height:100vh}}
+.card{{background:rgba(255,253,248,.92);border:1px solid rgba(160,118,82,.18);border-radius:22px;
+padding:42px 50px;text-align:center;box-shadow:0 26px 70px rgba(112,70,46,.14);max-width:440px;
+backdrop-filter:blur(12px)}}
+.icon{{width:54px;height:54px;border-radius:16px;color:#fff8f4;font-size:26px;line-height:54px;
+margin:0 auto 16px;background:{color};transform:rotate(-3deg);box-shadow:0 8px 20px rgba(112,70,46,.18)}}
+h1{{font-size:19px;margin:0 0 10px;letter-spacing:.08em}}p{{font-size:13px;color:#6f6353;margin:0;line-height:1.9}}
 </style></head><body>
 <div class="card"><div class="icon">{icon}</div>
 <h1>{'授权成功' if ok else '授权未完成'}</h1>

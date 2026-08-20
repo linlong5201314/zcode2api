@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from .. import settings
 from ..auth_admin import verify_admin_key
-from ..models import PROVIDERS, Status
+from ..models import PROVIDERS, Status, looks_like_jwt
 from ..oauth import ZaiAuthFlow, discard_callback, display_name, extract_code
 from ..proxy import (
     detect_system_proxy,
@@ -99,16 +99,18 @@ async def add_accounts(payload: dict = Body(...)):
         raise HTTPException(400, "请输入至少一个 Token / API Key")
 
     added = []
+    touched = []
     for tok in dict.fromkeys(tokens):  # 去重保序
         name = payload.get("name") or f"{provider}-{len(store.list_accounts(provider)) + 1}"
         try:
             acc, created = store.add_account_with_status(provider, name, tok)
         except ValueError as err:
             raise HTTPException(400, str(err)) from err
+        touched.append(acc.id)
         if created:
             added.append(acc.id)
     # 立即刷新一次额度（仅 zai jwt）
-    fresh = [a for a in store.list_accounts(provider) if a.id in added and a.mode == "jwt"]
+    fresh = [a for a in store.list_accounts(provider) if a.id in touched and a.mode == "jwt"]
     if fresh:
         await refresh_accounts(fresh)
     return {"count": len(added), "ids": added}
@@ -133,16 +135,32 @@ async def edit_account(account_id: str, payload: dict = Body(...)):
         raise HTTPException(404, "账号不存在")
     if "name" in payload and payload["name"]:
         acc.name = payload["name"].strip()
-    secret = payload.get("token") or payload.get("secret")
-    if secret:
+    secret = payload.get("token") if "token" in payload else payload.get("secret")
+    refresh_result = None
+    if secret is not None:
+        if not isinstance(secret, str) or not secret.strip():
+            raise HTTPException(400, "账号凭证不能为空")
         secret = secret.strip()
-        acc.mode = "jwt" if (secret.count(".") == 2 and acc.provider == "zai") else "apiKey"
+        acc.mode = "jwt" if looks_like_jwt(secret, acc.provider) else "apiKey"
         acc.jwt_token = secret if acc.mode == "jwt" else None
         acc.api_key = None if acc.mode == "jwt" else secret
+        # A replacement credential invalidates the previous snapshot.  Refresh
+        # JWTs immediately so a newly activated Coding Plan is visible without
+        # requiring a second manual click.
+        acc.quota = {}
+        acc.plan = {}
+        acc.usage = {}
         acc.status = Status.ACTIVE
         acc.last_error = None
     store.update_account(acc)
-    return {"ok": True}
+    if secret is not None and acc.mode == "jwt":
+        refresh_result = await fetch_quota(acc)
+    return {
+        "ok": True,
+        "refreshed": refresh_result is not None,
+        "refresh": refresh_result,
+        "account": acc.public_view(),
+    }
 
 
 # ── 启用 / 禁用 ──────────────────────────────────────────────────────────────
@@ -356,6 +374,7 @@ async def post_proxy_subscription(payload: dict = Body(...)):
 @router.get("/settings")
 async def get_settings():
     admin_key = store.admin_key()
+    admin_user = store.admin_user()
     gateway_key = store.gateway_key()
 
     def _hint(value: str) -> str | None:
@@ -368,6 +387,8 @@ async def get_settings():
         # endpoint returned both keys in plaintext on every settings refresh.
         "admin_key": None,
         "gateway_key": None,
+        "admin_user": admin_user,
+        "admin_user_required": bool(admin_user),
         "admin_key_set": bool(admin_key),
         "gateway_key_set": bool(gateway_key),
         "admin_key_hint": _hint(admin_key),
@@ -378,6 +399,11 @@ async def get_settings():
 
 @router.put("/settings")
 async def update_settings(payload: dict = Body(...)):
+    if "admin_user" in payload:
+        user = str(payload["admin_user"] or "").strip()
+        if len(user) > 120 or any(ord(char) < 32 for char in user):
+            raise HTTPException(400, "后台账号格式无效")
+        store.set_setting("admin_user", user)
     if "admin_key" in payload:
         key = (payload["admin_key"] or "").strip()
         if not key:

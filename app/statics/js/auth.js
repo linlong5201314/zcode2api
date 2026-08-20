@@ -36,18 +36,27 @@ function _keyStore(k){
   };
 }
 const adminKey=_keyStore('zcode2api_admin_key');
+const adminUser=_keyStore('zcode2api_admin_user');
 
-async function verifyKey(url,key){
-  return (await fetch(url,{headers:key?{Authorization:`Bearer ${key}`}:{}})).ok;
+async function verifyKey(url,key,user){
+  const headers={};
+  if(key)headers.Authorization=`Bearer ${key}`;
+  if(user)headers['X-Admin-User']=user;
+  return (await fetch(url,{headers})).ok;
 }
-function adminLogout(){adminKey.clear();location.href='/admin/login';}
+function adminLogout(){adminKey.clear();adminUser.clear();location.href='/admin/login';}
 
 /* 统一的后台 API 调用封装 */
 async function api(method,path,body){
   const key=await adminKey.get();
+  const user=await adminUser.get();
   const r=await fetch(ADMIN_API+path,{
     method,
-    headers:{...(body!=null&&{'Content-Type':'application/json'}),Authorization:`Bearer ${key}`},
+    headers:{
+      ...(body!=null&&{'Content-Type':'application/json'}),
+      ...(key&&{Authorization:`Bearer ${key}`}),
+      ...(user&&{'X-Admin-User':user}),
+    },
     ...(body!=null&&{body:JSON.stringify(body)}),
   });
   if(!r.ok){const d=await r.json().catch(()=>({}));throw new Error(d.detail||r.status);}

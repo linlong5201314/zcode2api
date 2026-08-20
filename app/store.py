@@ -70,6 +70,10 @@ class Store:
                 (settings.DEFAULT_ADMIN_KEY,),
             )
             conn.execute(
+                f"INSERT OR IGNORE INTO {_META} (key, value) VALUES ('admin_user', ?)",
+                (settings.DEFAULT_ADMIN_USER,),
+            )
+            conn.execute(
                 f"INSERT OR IGNORE INTO {_META} (key, value) VALUES ('gateway_key', '')"
             )
             conn.execute(
@@ -83,6 +87,7 @@ class Store:
             meta_rows = conn.execute(f"SELECT key, value FROM {_META}").fetchall()
             self._settings = {r["key"]: r["value"] for r in meta_rows}
             self._settings.setdefault("admin_key", settings.DEFAULT_ADMIN_KEY)
+            self._settings.setdefault("admin_user", settings.DEFAULT_ADMIN_USER)
             self._settings.setdefault("gateway_key", "")
             self._settings.setdefault("quota_refresh_interval", str(settings.QUOTA_REFRESH_INTERVAL))
 
@@ -144,6 +149,9 @@ class Store:
 
     def admin_key(self) -> str:
         return str(self.get_setting("admin_key", settings.DEFAULT_ADMIN_KEY) or "")
+
+    def admin_user(self) -> str:
+        return str(self.get_setting("admin_user", settings.DEFAULT_ADMIN_USER) or "").strip()
 
     def gateway_key(self) -> str:
         return str(self.get_setting("gateway_key", "") or "")

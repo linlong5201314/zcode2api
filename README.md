@@ -29,9 +29,10 @@ cpolar http 3000        # 得到形如 https://xxxx.r6.cpolar.top 的公网地�
 客户端 base_url 填该地址即可（也可用 frp / ngrok 等任意穿透工具）。
 若必须部署在云上，可配置 `ZCODE_UPSTREAM_PROXY` 指向住宅代理，验证码求解与上游请求将统一走代理。
 
-- 后台管理：`http://localhost:3000/admin`（默认密码 `zcode`）
+- 后台管理：`http://localhost:3000/admin`（默认账号 `admin`、密码 `zcode`）
 - 对话端点：`http://localhost:3000/v1/messages`（兼容 Anthropic Messages 协议）
 - OpenAI 兼容端点：`http://localhost:3000/v1/chat/completions`（流式 / 非流式均支持）
+- OpenAI Responses 端点：`http://localhost:3000/v1/responses`（Codex / 新版 SDK 使用）
 - 存活探针：`GET /healthz`；就绪探针：`GET /readyz`（可直接用于 Docker / K8s）
 
 ## Docker 部署
@@ -48,6 +49,7 @@ docker build -t zcode2api:latest .
 docker run -d --name zcode2api \
   -p 3000:3000 \
   -v "$(pwd)/data:/data" \
+  -e ZCODE_ADMIN_USER=admin \
   -e ZCODE_ADMIN_KEY=zcode \
   --restart unless-stopped \
   zcode2api:latest
@@ -92,6 +94,11 @@ docker run -d --name zcode2api -p 3000:3000 \
 - 上游 429 → 标记 `cooling` 冷却一段时间后自动恢复；401/403（非验证码）→ 标记 `invalid`。
 - 后台任务按 `ZCODE_QUOTA_REFRESH_INTERVAL` 周期刷新各账号额度；也可在 UI 手动刷新。
 
+额度刷新会同时读取旧版 `billing/*` 接口和当前 Coding Plan 的订阅/配额接口，兼容
+`balances`、`limits`、`available_units` 等返回结构。新增或编辑 JWT 后会立即刷新一次；
+若账号尚未购买/领取 Coding Plan，会显示“未激活套餐”，这表示上游没有授予额度，不能由
+网关本地伪造激活；该账号会暂时跳过轮询，套餐生效后下次刷新自动恢复。
+
 ## OAuth 授权登录（Z.AI）
 
 后台「账号池 → 新增 → 授权登录」提供两种方式，CLI `python main.py login zai` 为手动方式：
@@ -128,10 +135,60 @@ docker run -d --name zcode2api -p 3000:3000 \
 
 ## 鉴权
 
-- **后台鉴权**：所有 `/admin/api/*` 需 `Authorization: Bearer <后台密码>`。
-- **网关鉴权（可选）**：在「设置」配置「网关 API Key」后，`/v1/messages` 须携带
+- **后台鉴权**：所有 `/admin/api/*` 需 `X-Admin-User: <后台账号>` +
+  `Authorization: Bearer <后台密码>`；默认 `admin / zcode`。如将后台账号设为空，
+  可兼容旧版仅密码模式。
+- **网关鉴权（可选）**：在「设置」配置「网关 API Key」后，`/v1/messages`、`/v1/chat/completions`、`/v1/responses` 须携带
   `Authorization: Bearer <key>` 或 `x-api-key: <key>`；留空则不校验。
 - 管理设置接口不会回传后台密钥或网关 Key，只返回“已设置”和掩码提示；设置页中留空表示保持原值。
+
+## OpenAI / Codex 接入
+
+Chat Completions:
+
+```bash
+curl http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <网关 API Key，如未设置可省略>" \
+  -d '{"model":"GLM-5.3","messages":[{"role":"user","content":"你好"}],"stream":false}'
+```
+
+流式请求支持 OpenAI 标准的 `stream_options: {"include_usage": true}`，末尾会返回
+携带 `prompt_tokens / completion_tokens / total_tokens` 的用量块（`choices` 为空数组），
+Cherry Studio / LobeChat / NextChat 等客户端可直接显示 token 消耗；
+`/v1/models` 同时返回 OpenAI 与 Anthropic 两种字段格式，两类客户端均可直接拉取模型列表。
+
+Responses API（Codex 推荐）：
+
+```toml
+model = "GLM-5.3"
+model_provider = "zcode2api"
+
+[model_providers.zcode2api]
+name = "zcode2api"
+base_url = "http://127.0.0.1:3000/v1"
+env_key = "ZCODE2API_KEY"
+wire_api = "responses"
+```
+
+```bash
+set ZCODE2API_KEY=<网关 API Key；未设置则任意占位>
+set NO_PROXY=127.0.0.1,localhost
+codex exec "用一句话回答 OK"
+```
+
+Responses 兼容层会把 `input` / `instructions` / `max_output_tokens` / function tools
+转为上游 Anthropic Messages，再合成标准 `response.*` SSE 事件，避免新版客户端因
+只支持 `/v1/responses` 而报格式错误。
+
+## Railway / Zeabur / Ubuntu 部署
+
+- Railway：仓库根目录已有 `railway.toml`，使用 Dockerfile 构建，`/healthz` 做健康检查；
+  平台注入的 `PORT` 会自动被读取，无需硬编码 3000。
+- Zeabur：仓库根目录已有 `zbpack.json`，强制使用根目录 `Dockerfile`；Zeabur Git Service
+  同样读取 `$PORT`，不要在代码里写死端口。
+- Ubuntu：`docker compose up -d --build`，数据在 `./data`；升级前备份
+  `data/accounts.db`，升级后 `docker compose logs -f zcode2api` 看启动与健康检查。
 - 网关只向上游转发有限的客户端元数据 header，不会转发 Cookie、客户端 Authorization 或连接控制头。
 
 ## 无痕验证（无头 Chromium）
@@ -169,13 +226,17 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 |------|--------|------|
 | `ZCODE_PORT` | 3000 | 服务端口 |
 | `ZCODE_HOST` | 0.0.0.0 | 监听地址 |
+| `ZCODE_ADMIN_USER` | admin | 后台账号初始值（之后以 DB 为准；留空可仅密码登录）|
 | `ZCODE_ADMIN_KEY` | zcode | 后台密码初始值（之后以 DB 为准）|
 | `ZCODE_DATA_DIR` | ./data | 数据目录（SQLite 存放处）|
 | `ZCODE_QUOTA_REFRESH_INTERVAL` | 60 | 后台刷新额度间隔（秒），0 关闭 |
+| `ZCODE_QUOTA_TIMEOUT` | 20 | 单次额度接口请求超时（秒） |
 | `ZCODE_COOLING_SECONDS` | 300 | 限流冷却时长（秒）|
 | `ZCODE_CAPTCHA_TIMEOUT` | 40 | 单次验证码求解超时（秒）|
 | `ZCODE_CAPTCHA_RETRIES` | 4 | 验证码求解失败重试次数 |
 | `ZCODE_APP_VERSION` | 3.7.7 | 伪装的上游客户端版本号（请求头与配置接口）|
+| `ZCODE_SUBSCRIPTION_URL` | `https://api.z.ai/api/biz/subscription/list` | Coding Plan 订阅状态接口 |
+| `ZCODE_QUOTA_LIMIT_URL` | `https://api.z.ai/api/monitor/usage/quota/limit` | Coding Plan 配额接口 |
 | `ZCODE_UPSTREAM_PROXY` | 空 | 上游代理（http/socks5）。后台「代理设置」页保存的代理优先生效；验证码求解与上游请求统一走它 |
 | `ZCODE_CAPTCHA_STALE_GRACE` | 300000 | 验证码参数过期宽限期 (ms)，期间返回旧值并后台刷新 |
 | `ZCODE_CAPTCHA_FAIL_TTL` | 60000 | 求解失败熔断时长 (ms) |
@@ -209,6 +270,8 @@ python main.py export [file] / import <file>       # 导出 / 导入账号
 ├── data/                  # 运行时生成：accounts.db (SQLite)
 ├── Dockerfile             # 镜像（Python + Google Chrome）
 ├── docker-compose.yml     # 一键部署
+├── railway.toml           # Railway Dockerfile 部署与健康检查
+├── zbpack.json            # Zeabur 指定 Dockerfile
 ├── .dockerignore
 ├── .github/workflows/     # docker-build.yml（仅构建验证，不推送 Docker Hub）
 ├── docs/ARCHITECTURE.md   # 架构概览

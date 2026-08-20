@@ -5,6 +5,7 @@ import asyncio
 from app.routes.admin_api import get_settings
 from app.store import store
 from app.auth_admin import _extract_bearer, _safe_token
+from app.auth_admin import verify_admin_key
 
 
 def test_settings_endpoint_does_not_return_secret_material(monkeypatch) -> None:
@@ -26,3 +27,10 @@ def test_auth_tokens_reject_control_characters_and_extreme_length() -> None:
     assert _extract_bearer("Bearer good-token") == "good-token"
     assert _extract_bearer("Bearer bad\n-token") is None
     assert _safe_token("x" * 4097) is None
+
+
+def test_admin_auth_requires_username_when_configured(monkeypatch) -> None:
+    monkeypatch.setattr(store, "admin_user", lambda: "admin")
+    monkeypatch.setattr(store, "admin_key", lambda: "zcode")
+
+    asyncio.run(verify_admin_key(authorization="Bearer zcode", x_admin_user="admin"))

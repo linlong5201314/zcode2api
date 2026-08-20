@@ -54,12 +54,14 @@ DB_PATH = DATA_DIR / "accounts.db"
 STATIC_DIR = Path(__file__).resolve().parent / "statics"
 
 # ── 服务 ─────────────────────────────────────────────────────────────────────
-PORT = _bounded_int("ZCODE_PORT", 3000, 0, 65535)
+# Railway / Zeabur / Render 等平台通常注入 PORT；本地仍优先 ZCODE_PORT。
+PORT = _bounded_int("ZCODE_PORT", _int("PORT", 3000), 0, 65535)
 HOST = os.getenv("ZCODE_HOST", "0.0.0.0")
 
 # ── 鉴权 ─────────────────────────────────────────────────────────────────────
 # 后台管理密码默认值，首次启动写入 data/accounts.db，之后以数据库（meta 表）为准。
 DEFAULT_ADMIN_KEY = os.getenv("ZCODE_ADMIN_KEY", "zcode")
+DEFAULT_ADMIN_USER = os.getenv("ZCODE_ADMIN_USER", "admin").strip()
 
 # OAuth 授权码回跳地址。Z.AI 服务端按 client_id 校验重定向 URI 白名单，
 # 该公开 client_id 仅注册了 zcode.z.ai 的登录页 /login（与网页端实测一致），
@@ -164,4 +166,4 @@ MAX_REQUEST_BYTES = _bounded_int(
 # 对齐 ZCode 桌面端版本号（上游 configs / 请求头均校验版本）
 ZCODE_APP_VERSION = os.getenv("ZCODE_APP_VERSION", "3.7.7")
 USER_AGENT = os.getenv("UPSTREAM_USER_AGENT", f"ZCode/{ZCODE_APP_VERSION}")
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"

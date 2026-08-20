@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>zcode2api · 账号池</title>
-  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
   <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
 </head>
 <body>
@@ -40,9 +39,9 @@
   <div class="section-head"><div class="section-title">账户概览</div></div>
   <div class="stat-grid">
     <div class="stat-cell"><div class="stat-top"><div class="stat-label">账户总数</div><span class="stat-icon"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 19a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4"/><circle cx="12" cy="8" r="4"/></svg></span></div><div class="stat-num" id="s-total">0</div></div>
-    <div class="stat-cell"><div class="stat-top"><div class="stat-label">正常</div><span class="stat-icon" style="color:#16a34a"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.4 2.4 4.8-4.8"/></svg></span></div><div class="stat-num" id="s-active" style="color:#16a34a">0</div></div>
-    <div class="stat-cell"><div class="stat-top"><div class="stat-label">额度用完</div><span class="stat-icon" style="color:#8d6bbd"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M6 19h12"/><path d="M12 16V9"/></svg></span></div><div class="stat-num" id="s-exhausted" style="color:#8d6bbd">0</div></div>
-    <div class="stat-cell"><div class="stat-top"><div class="stat-label">总额度（剩余）</div><span class="stat-icon" style="color:#4c9168"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg></span></div><div class="stat-num" id="s-quota" style="color:#4c9168">0</div></div>
+    <div class="stat-cell"><div class="stat-top"><div class="stat-label">正常</div><span class="stat-icon" style="color:var(--matcha-deep)"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.4 2.4 4.8-4.8"/></svg></span></div><div class="stat-num" id="s-active" style="color:var(--matcha-deep)">0</div></div>
+    <div class="stat-cell"><div class="stat-top"><div class="stat-label">额度用完</div><span class="stat-icon" style="color:#9a7bb5"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M6 19h12"/><path d="M12 16V9"/></svg></span></div><div class="stat-num" id="s-exhausted" style="color:#9a7bb5">0</div></div>
+    <div class="stat-cell"><div class="stat-top"><div class="stat-label">总额度（剩余）</div><span class="stat-icon" style="color:var(--gold)"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg></span></div><div class="stat-num" id="s-quota" style="color:var(--gold)">0</div></div>
   </div>
 
   <div class="section-head">
@@ -192,7 +191,8 @@ const PROVIDER_LABEL={zai:'智谱 Z.AI',bigmodel:'智谱 BigModel'};
 (async()=>{
   await renderAdminHeader();
   const key=await adminKey.get();
-  if(!key||!await verifyKey(ADMIN_API+'/verify',key).catch(()=>false))return location.href='/admin/login';
+  const user=await adminUser.get();
+  if(!key||!await verifyKey(ADMIN_API+'/verify',key,user).catch(()=>false))return location.href='/admin/login';
   await load();
   startPolling();
 })();
@@ -246,14 +246,14 @@ function rowHtml(a){
   const loading=refreshing.has(a.id);
   const userEmail=(a.user&&a.user.email)?` · ${esc(a.user.email)}`:'';
   return `<tr>
-    <td><span class="tok">${esc(a.token_masked)}</span><div style="font-size:11px;color:#aaa;margin-top:2px">${esc(a.name)}${userEmail}</div></td>
+    <td><span class="tok">${esc(a.token_masked)}</span><div style="font-size:11px;color:var(--ink-faint);margin-top:2px">${esc(a.name)}${userEmail}</div></td>
     <td class="table-center">${PROVIDER_LABEL[a.provider]||esc(a.provider)}</td>
     <td class="table-center"><span class="badge badge-${a.mode}">${isJwt?'套餐令牌':'接口密钥'}</span></td>
     <td class="table-center"><span class="badge badge-${a.status}">${STATUS_LABEL[a.status]||a.status}</span></td>
     <td>${quotaCell(a)}</td>
-    <td class="table-center" style="color:#8f8f8f">${a.use_count||0}</td>
-    <td class="table-center" style="color:#9a9a9a">${a.fail_count||0}</td>
-    <td style="font-size:12px;color:#9a9a9a">${fmtDate(a.last_used_at)}</td>
+    <td class="table-center" style="color:var(--ink-soft)">${a.use_count||0}</td>
+    <td class="table-center" style="color:var(--ink-faint)">${a.fail_count||0}</td>
+    <td style="font-size:12px;color:var(--ink-faint)">${fmtDate(a.last_used_at)}</td>
     <td><div class="row-actions">
       ${isJwt?`<button onclick="refreshOne('${a.id}')" class="row-icon-btn${loading?' is-loading':''}" title="刷新额度"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.6"/><path d="M4 4v5h5"/><path d="M4 13a8 8 0 0 0 14.6 4.6"/><path d="M20 20v-5h-5"/></svg></button>`:''}
       <button onclick="toggleEnabled('${a.id}',${isDisabled})" class="row-icon-btn" title="${isDisabled?'恢复':'禁用'}">
@@ -268,11 +268,18 @@ function rowHtml(a){
 function quotaCell(a){
   const q=a.quota||{};
   const keys=Object.keys(q);
-  if(!keys.length)return a.mode==='jwt'?'<span class="quota-empty">未获取</span>':'<span class="quota-empty">—</span>';
+  if(!keys.length){
+    if(a.mode!=='jwt')return '<span class="quota-empty">—</span>';
+    const plan=a.plan||{};
+    if(plan.status==='not_entitled')return '<span class="quota-empty" title="上游未授予 Coding Plan 额度">未激活套餐</span>';
+    if(plan.active===true)return '<span class="quota-empty">套餐已激活，待同步</span>';
+    if(a.last_error)return `<span class="quota-empty" title="${esc(a.last_error)}">查询失败</span>`;
+    return '<span class="quota-empty">未获取</span>';
+  }
   return '<div class="quota-rows">'+keys.map(k=>{
     const w=q[k]||{};const rem=Number(w.remaining)||0,tot=Number(w.total)||0;
     const pct=tot>0?Math.max(0,Math.min(100,Math.round(rem/tot*100))):0;
-    const color=rem<=0?'#c9c9cf':(pct<15?'#b0632a':'#4c9168');
+    const color=rem<=0?'#c9bfb0':(pct<15?'#c9a05e':'#6fa58e');
     return `<div class="quota-row">
       <span class="quota-row-name">${esc(shortModel(k))}</span>
       <span class="quota-row-track"><span class="quota-row-fill" style="width:${pct}%;background:${color}"></span></span>
@@ -490,7 +497,7 @@ async function onImportFile(ev){
 /* ── Helpers ── */
 function set(id,v){const e=document.getElementById(id);if(e)e.textContent=v;}
 function fmt(n){n=Number(n)||0;return n>=10000?(n/1000).toFixed(1)+'k':n;}
-function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function fmtDate(d){if(!d)return'—';const dt=new Date(d*1000);return isNaN(dt)?'—':dt.toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}
 function openModal(id){document.getElementById(id).classList.add('open');}
 function closeModal(id){document.getElementById(id).classList.remove('open');}

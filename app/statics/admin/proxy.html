@@ -4,22 +4,21 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>zcode2api · 代理设置</title>
-  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
   <link href="/static/css/app.css?v={{APP_VERSION}}" rel="stylesheet">
   <style>
     .proxy-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-    .proxy-tag{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid #e4e4e7;
-      border-radius:8px;font-size:12px;cursor:pointer;background:#fff;transition:all .15s}
-    .proxy-tag:hover{border-color:#18181b;background:#fafafa}
-    .proxy-tag .port{font-weight:600}
-    .kv{display:flex;gap:24px;flex-wrap:wrap;font-size:12.5px;color:#52525b;line-height:2}
-    .kv b{color:#18181b;font-weight:600}
-    .test-result{margin-top:10px;padding:12px 14px;border-radius:10px;background:#f4f4f5;
+    .proxy-tag{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border:1px solid var(--border-strong);
+      border-radius:999px;font-size:12px;cursor:pointer;background:rgba(255,255,255,.7);transition:all .16s}
+    .proxy-tag:hover{border-color:var(--sakura);background:#fff;transform:translateY(-1px)}
+    .proxy-tag .port{font-weight:700;color:var(--sakura-deep)}
+    .kv{display:flex;gap:24px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-soft);line-height:2}
+    .kv b{color:var(--ink);font-weight:600}
+    .test-result{margin-top:10px;padding:13px 16px;border-radius:var(--radius);background:var(--info-bg);
       font-size:12.5px;line-height:1.9;display:none}
-    .test-result.ok{background:#f0fdf4;color:#14532d}
-    .test-result.err{background:#fef2f2;color:#7f1d1d}
+    .test-result.ok{background:var(--matcha-mist);color:var(--matcha-deep)}
+    .test-result.err{background:var(--error-bg);color:var(--error)}
     .type-pill{display:inline-block;margin:2px 4px 2px 0;padding:3px 10px;border-radius:20px;
-      background:#f4f4f5;border:1px solid #e4e4e7;font-size:11.5px;color:#3f3f46}
+      background:var(--sky-mist);border:1px solid var(--border);font-size:11.5px;color:var(--sky)}
   </style>
 </head>
 <body>
@@ -102,7 +101,8 @@ const SOURCE_LABEL={db:'后台设置',env:'环境变量',none:'未启用（直�
 (async()=>{
   await renderAdminHeader();
   const key=await adminKey.get();
-  if(!key||!await verifyKey(ADMIN_API+'/verify',key).catch(()=>false))return location.href='/admin/login';
+  const user=await adminUser.get();
+  if(!key||!await verifyKey(ADMIN_API+'/verify',key,user).catch(()=>false))return location.href='/admin/login';
   load();
 })();
 
@@ -119,10 +119,10 @@ function renderCurrent(d){
   const sys=d.system||{};
   let html='';
   if(cur.url){
-    html+=`<span>状态：<b style="color:#16a34a">已启用</b></span><span>地址：<b>${esc(cur.masked||cur.url)}</b></span><span>来源：<b>${SOURCE_LABEL[cur.source]||cur.source}</b></span>`;
+    html+=`<span>状态：<b style="color:var(--matcha-deep)">已启用</b></span><span>地址：<b>${esc(cur.masked||cur.url)}</b></span><span>来源：<b>${SOURCE_LABEL[cur.source]||cur.source}</b></span>`;
     document.getElementById('btn-off').style.display='';
   }else{
-    html+=`<span>状态：<b style="color:#a1a1aa">未启用（直连）</b></span><span>来源：<b>${SOURCE_LABEL[cur.source]||cur.source}</b></span>`;
+    html+=`<span>状态：<b style="color:var(--ink-faint)">未启用（直连）</b></span><span>来源：<b>${SOURCE_LABEL[cur.source]||cur.source}</b></span>`;
     document.getElementById('btn-off').style.display='none';
   }
   if(sys.enabled&&sys.url)html+=`<span>系统代理：<b>${esc(sys.url)}</b>（可直接导入）</span>`;

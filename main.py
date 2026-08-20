@@ -23,7 +23,7 @@ import time
 
 from app import settings
 from app.models import Status
-from app.oauth import ZaiAuthFlow, extract_code
+from app.oauth import ZaiAuthFlow, display_name, extract_code
 from app.quota import fetch_quota
 from app.store import store
 
@@ -101,18 +101,50 @@ async def cmd_login(args: list[str]) -> None:
 
     zcode_jwt = data.get("token")
     access_token = (data.get("zai") or {}).get("access_token")
+    user = data.get("user") or {}
+    name = display_name(user) or "oauth-login"
+    account = None
     if zcode_jwt:
-        acc = store.add_account("zai", "oauth-login", zcode_jwt)
-        print(c(f"\n✔ 已保存 Coding Plan JWT 账号: {acc.name} ({acc.id})", "green"))
+        account = store.add_account("zai", name, zcode_jwt)
+        account.user = user
+        store.update_account(account)
+        print(c(f"\n✔ 已保存 Coding Plan JWT 账号: {account.name} ({account.id})", "green"))
     if access_token:
         try:
             key = await flow.exchange_api_key(access_token)
-            store.add_account("zai", "oauth-apikey", key)
+            if account is not None:
+                # 同一 OAuth 会话：把 API Key 挂到 JWT 账号上作为回退凭证，不再单独立号
+                account.api_key = key
+                store.update_account(account)
+            else:
+                store.add_account("zai", name, key)
             print(c(f"✔ 已兑换并保存 API Key: {key[:8]}...", "green"))
         except Exception as err:  # noqa: BLE001
             print(c(f"⚠️ 兑换 API Key 失败: {err}", "yellow"))
     if not zcode_jwt:
         print(c("❌ 返回数据中不含 Coding Plan JWT", "red"))
+        return
+
+    # 登录后立即拉取额度，确保账号以「已激活」状态入池（与后台 OAuth 登录行为一致）
+    if account is not None:
+        print(c("\n正在拉取 Coding Plan 额度...", "cyan"))
+        await fetch_quota(account)
+        _print_quota(account)
+        if account.status == Status.EXHAUSTED:
+            print(c("⚠️ 该账号额度已用完", "yellow"))
+        elif account.status == Status.INVALID:
+            print(c(f"⚠️ 账号状态异常: {account.last_error or account.status}", "yellow"))
+
+
+def _print_quota(a) -> None:
+    """终端打印单账号额度摘要。"""
+    if not a.quota:
+        print("  无额度数据" + (f"（{a.last_error}）" if a.last_error else ""))
+        return
+    for model, q in a.quota.items():
+        rem, tot = q.get("remaining") or 0, q.get("total") or 0
+        pct = f" ({rem / tot * 100:.0f}%)" if tot else ""
+        print(f"  {c(model, 'cyan')}: 剩余 {rem:,} / 总额 {tot:,}{pct}")
 
 
 # ── 账号管理 ─────────────────────────────────────────────────────────────────
@@ -176,11 +208,7 @@ async def cmd_quota() -> None:
     for a in accounts:
         await fetch_quota(a)
         print(c(f"\n账号: {a.name} ({a.effective_status()})", "bold"))
-        if not a.quota:
-            print("  无额度数据")
-        for model, q in a.quota.items():
-            rem, tot = q.get("remaining") or 0, q.get("total") or 0
-            print(f"  {c(model, 'cyan')}: 剩余 {rem:,} / 总额 {tot:,}")
+        _print_quota(a)
 
 
 def cmd_export(args: list[str]) -> None:
